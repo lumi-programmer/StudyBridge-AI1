@@ -1,0 +1,46 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 611 >>
+stream
+BT
+/F1 12 Tf
+72 720 Td
+18 TL
+(Physics - Class 10 \(Punjab Board\)) Tj T*
+(Contents) Tj T*
+(Chapter 1 Simple Harmonic Motion and Waves ......... 1) Tj T*
+(Chapter 2 Characteristics of Waves .................. 15) Tj T*
+(Chapter 3 Geometrical Optics ........................ 29) Tj T*
+(Chapter 4 Electrostatics ............................ 47) Tj T*
+(Chapter 5 Current Electricity ....................... 63) Tj T*
+(Chapter 6 Electromagnetism .......................... 81) Tj T*
+(Chapter 7 Basic Electronics ......................... 97) Tj T*
+(Chapter 8 Atomic and Nuclear Physics ................ 111) Tj T*
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000241 00000 n 
+0000000903 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+973
+%%EOF

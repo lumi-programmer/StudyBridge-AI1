@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>StudyBridge AI by SchoolPlanner.pk — learn without the subscription</title>
+<meta name="description" content="StudyBridge AI by SchoolPlanner.pk: scan your textbooks, study with your own AI provider, keep focus sessions, play brain games and earn Bridge Credits that never lock the basics. Powered by Future Innovations.">
+<meta name="theme-color" content="#161a2e">
+<link rel="icon" href="./assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="./styles/app.css">
+<link rel="stylesheet" href="./styles/views.css">
+<script>
+// Resolve the theme before the first paint so a reload never flashes the wrong one.
+(function () {
+  try {
+    var mode = localStorage.getItem('studybridge.theme');
+    if (mode !== 'light' && mode !== 'dark') mode = 'system';
+    var dark = mode === 'dark' || (mode === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  } catch (error) {
+    document.documentElement.dataset.theme = 'light';
+  }
+})();
+</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<div class="shell">
+  <header class="topbar">
+    <button class="icon-btn menu-btn" id="navToggle" aria-label="Open navigation" aria-expanded="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+    </button>
+    <a class="brand" href="#/dashboard">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-text">StudyBridge<em>AI</em></span>
+      <span class="brand-co">by SchoolPlanner.pk</span>
+    </a>
+    <div class="topbar-chips" id="chips">
+      <a class="chip chip-credits" href="#/wallet" id="chipCredits" title="Bridge Credits balance">
+        <span class="chip-dot" aria-hidden="true"></span><b>—</b><span class="chip-label">BC</span>
+      </a>
+      <a class="chip chip-streak" href="#/streak" id="chipStreak" title="Study streak">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3c2 3-1 4 0 7 .8-1 2-2 2.4-3.4C16.6 9 19 11.4 19 14.6A7 7 0 1 1 5 14.6C5 10.5 9 8 12 3z"/></svg>
+        <b>—</b><span class="chip-label">day streak</span>
+      </a>
+      <button class="icon-btn theme-toggle" id="themeToggle" type="button" aria-label="Switch between dark and light" title="Switch theme">
+        <svg class="glyph-light" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A8.5 8.5 0 1 1 11.2 3a6.8 6.8 0 0 0 9.8 9.8z"/></svg>
+        <svg class="glyph-dark" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.4M12 19.1v2.4M2.5 12h2.4M19.1 12h2.4M5.4 5.4l1.7 1.7M16.9 16.9l1.7 1.7M18.6 5.4l-1.7 1.7M7.1 16.9l-1.7 1.7"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <nav class="sidenav" id="sidenav" aria-label="Main sections">
+    <div class="nav-co">
+      <span class="nav-co-mark" aria-hidden="true">SP</span>
+      <span class="nav-co-text">
+        <a class="nav-co-name" href="https://schoolplanner.pk" target="_blank" rel="noopener noreferrer">SchoolPlanner.pk</a>
+        <small>StudyBridge AI</small>
+      </span>
+    </div>
+    <div class="nav-group-label">Study</div>
+    <a href="#/dashboard" data-nav="dashboard"><i aria-hidden="true">◧</i>Dashboard</a>
+    <a href="#/spaces" data-nav="spaces"><i aria-hidden="true">▤</i>My Spaces</a>
+    <a href="#/library" data-nav="library"><i aria-hidden="true">📚</i>My Library</a>
+    <a href="#/scanner" data-nav="scanner"><i aria-hidden="true">⌗</i>Smart Scanner</a>
+    <a href="#/tutor" data-nav="tutor"><i aria-hidden="true">✦</i>AI Tutor</a>
+    <div class="nav-group-label">Practice</div>
+    <a href="#/focus" data-nav="focus"><i aria-hidden="true">◐</i>Focus Mode</a>
+    <a href="#/games" data-nav="games"><i aria-hidden="true">✧</i>Game Center</a>
+    <a href="#/streak" data-nav="streak"><i aria-hidden="true">▲</i>Daily Streaks</a>
+    <div class="nav-group-label">You</div>
+    <a href="#/progress" data-nav="progress"><i aria-hidden="true">◔</i>My Progress</a>
+    <a href="#/wallet" data-nav="wallet"><i aria-hidden="true">◈</i>Bridge Wallet</a>
+    <a href="#/settings" data-nav="settings"><i aria-hidden="true">⚙</i>Settings</a>
+    <div class="nav-foot">
+      <p id="navProvider">No AI provider connected yet.</p>
+      <p class="nav-note">Study tools, quizzes and games stay free at zero credits.</p>
+      <p class="nav-powered">Powered by <b>Future Innovations</b></p>
+    </div>
+  </nav>
+
+  <main class="stage" id="main" tabindex="-1">
+    <div class="route-view" id="view">
+      <div class="boot-state" id="bootState">
+        <div class="skeleton-stack" aria-hidden="true">
+          <span></span><span></span><span></span><span></span>
+        </div>
+        <p>Loading your study bridge…</p>
+        <p class="boot-co tiny muted">StudyBridge AI · SchoolPlanner.pk · Powered by Future Innovations</p>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+<div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-hidden="true" hidden>
+  <div class="sheet-panel" id="sheetPanel"></div>
+</div>
+<div class="focus-dock" id="focusDock" hidden>
+  <span class="focus-dock-ring" aria-hidden="true"></span>
+  <span class="focus-dock-text"><b id="focusDockTime">00:00</b> Deep Study</span>
+  <button class="link-btn" id="focusDockGo" type="button">Open</button>
+  <button class="link-btn" id="focusDockStop" type="button">Stop</button>
+</div>
+
+<noscript>
+  <p class="noscript">StudyBridge needs JavaScript. The API itself works without a browser — see the route list in the project README.</p>
+</noscript>
+
+<script type="module" src="./js/app.js"></script>
+</body>
+</html>
