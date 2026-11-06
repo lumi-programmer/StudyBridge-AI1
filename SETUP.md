@@ -42,7 +42,9 @@ shell take precedence). The deployed Function never reads a file.
 
 | Variable | Needed for | If unset |
 | --- | --- | --- |
-| `CREDENTIAL_KEY` | saving a BYOK provider key | saving fails `credentials_not_configured` |
+| `CREDENTIAL_KEY` | saving a BYOK provider key and a platform provider key | saving fails `credentials_not_configured` |
+| `ADMIN_OWNER_IDS` | naming the first administrator | no admin exists; the admin pages answer `admin_required` |
+| `OPENROUTER_API_KEY` | StudyBridge Free AI (the central provider every student uses) | the central provider does not exist; the tutor says so plainly and nothing is faked |
 | `FREE_TRIAL_*` | the platform Free Trial | the trial reports "Not switched on yet", honestly |
 | `AI_*` and `MODEL_COOLDOWN_*` | tuning retries and cooldown | the built-in defaults in [tuning retries](#tuning-retries-cooldown-and-fallback) apply |
 
@@ -52,6 +54,89 @@ and `.env` is gitignored. **Never put a real provider key in it.**
 
 Note that `CREDENTIAL_KEY` is the AES-GCM key (SHA-256 of the string). Changing it makes
 previously stored provider keys undecryptable — set it once per environment.
+
+`ADMIN_OWNER_IDS` is a comma-separated list of owner ids that are administrators from
+the first request. It is a **bootstrap** secret: the Function reads it only to grant
+the `admin` role when `app.user_roles` has no row for that owner. After the first
+administrator exists, roles are managed in Admin → Roles, and the Secret can be
+removed. It is not a way to keep a role alive — deleting the row revokes it.
+
+```sh
+# the owner id is the platform user id — read it from GET /api/bootstrap
+ADMIN_OWNER_IDS=<owner-id> PORT=4317 ./dev-tools/node.sh dev-tools/serve.mjs
+```
+
+### StudyBridge Free AI — the central provider
+
+This is the one key the platform holds. Students never need one.
+
+```sh
+OPENROUTER_API_KEY=sk-or-v1-... PORT=4317 ./dev-tools/node.sh dev-tools/serve.mjs
+```
+
+With the key set, the Function provisions the central provider itself:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `OPENROUTER_API_KEY` | — | the platform's OpenRouter key. Absent ⇒ no central provider |
+| `OPENROUTER_PROVIDER_ID` | `openrouter-central` | the provider row it provisions |
+| `OPENROUTER_NAME` | `OpenRouter` | the display name in Admin |
+| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | the API root, SSRF-checked |
+| `OPENROUTER_MODEL` | `openrouter/free` | the routing model |
+| `OPENROUTER_ENABLED` | `true` | `false` takes the provider out of service |
+| `OPENROUTER_DAILY_QUOTA` | `0` | shared requests/day for all students; `0` = no cap |
+
+The provisioning is idempotent and runs on every request, so rotating the key
+takes effect immediately and removing it takes the provider out of service again
+— no admin step, no restart.
+
+**The free-only rule.** Before anything is routed, the provider's own `/models`
+catalogue is read and a model is usable only when the published input price **and**
+the output price are exactly zero. A model whose price is missing or unreadable is
+recorded as `pricing_verified: false` and is never called. A paid model is recorded
+as `free_tier: false` and is disabled. The catalogue is re-read daily, and sooner
+after a failed check, so a price change cannot quietly make a model billable.
+
+**The daily allowance.** Each student may ask 10 successful questions per
+`Asia/Karachi` calendar day (midnight Pakistan time, UTC+5). The count lives in
+`app.ai_daily_slots` — one numbered slot row per question, unique on
+`(owner_id, day, slot)` — so concurrent clicks cannot race past the cap, and a
+failed request releases its slot. Refresh, logout or a new device changes nothing:
+the backend decides eligibility from stored UTC timestamps.
+
+**The shared quota is separate.** `OPENROUTER_DAILY_QUOTA` is the platform's own
+budget for all students together. When it is spent, students see exactly
+*"StudyBridge AI is temporarily busy. Please try again later."* The provider's own
+rate limits and quotas are separate again, and StudyBridge's midnight reset never
+restores them.
+
+### Configuring the platform gateway
+
+The gateway answers with models an administrator has **verified as free**. The order
+is deliberate and the price check is the gate:
+
+1. Save the provider in **Admin → AI Providers**. Name, provider key, Base URL,
+   protocol (`openai` / `openrouter` / `gemini`) and the API key. The key is stored
+   AES-GCM encrypted on the server and is never displayed again — only the last four
+   characters (`key_hint`) are ever returned.
+2. Press **Verify pricing**. The Function reads the provider's own catalogue and
+   checks each model. A model counts as free only when the provider published
+   **exactly zero for input and for output**. A model whose price cannot be read is
+   left unverified and disabled.
+3. Enable only the verified free models. `PATCH /api/admin/models/<row>` refuses
+   (`pricing_not_verified`) to enable a model whose zero pricing was never confirmed.
+4. Press **Test connection** to make one real request through the provider's own
+   protocol. A catalogue is not proof that a key works — the answer has to come back.
+
+For OpenRouter, the Base URL is `https://openrouter.ai/api/v1` and the free router
+model id is `openrouter/free`. The router is not priced itself: it picks a model per
+request, so the gateway checks **the model the router actually returned** against the
+verified-free list on every answer. If that model is not on the list, the response is
+refused, the request fails with `free_models_unavailable` and the reserved credits are
+returned — the student is never charged for a paid model.
+
+Adding a second free provider later needs no change to the tutor: register it, verify
+it, enable its models, and the gateway routes to it when the first is unavailable.
 
 ### Running the Free Trial locally
 
@@ -184,7 +269,7 @@ while `web/` files are read per request but the browser may need a reload.
 ./dev-tools/node.sh dev-tools/_run.mjs         # the behaviour suite
 ```
 
-Expected last line: `SUITE: 441/441 passed`. Sections: **A** core (bootstrap, profile,
+Expected last line: `SUITE: 619/619 passed`. Sections: **A** core (bootstrap, profile,
 wallet, daily, deletion), **B** library and books, **C** scanner, **D** providers and BYOK
 (including namespaced model ids and the exact wire format), **E** learning (quizzes,
 sessions, games, progress), **F** owner isolation, **G** failure paths with the provider
@@ -204,7 +289,17 @@ Base URL pasted from the catalogue page still producing one binding, discovery t
 follows `nextPageToken` to the page holding the model, a catalogue that could only be read
 partly never denying a model, the protocol re-inferred when the Base URL is edited, and the
 gateway's `unexpected model name format` 400 classified as a model problem rather than a key
-problem).
+problem), **L** the acceptance suite for the central gateway and the credits economy —
+the sixteen published criteria, each asserted against a real wallet row, a real ledger row
+or a real outbound request rather than a mock answer — and **M** the acceptance suite for
+the central AI system: the central provider coming up from the environment alone, a real
+question answered and charged exactly 2 BC, a failed request costing 0 BC and keeping the
+allowance, the daily login paying 30 BC once per Pakistan day, the tenth question allowed
+and the eleventh refused, the midnight `Asia/Karachi` reset with credits surviving it, a
+balance that cannot be moved from the browser, no cross-student wallet access, no paid
+model ever called, an unknown-price model refused, a rate limit handled without a charge,
+the provider key never reaching the browser, and eleven concurrent requests unable to pass
+the cap or double-charge.
 
 `./dev-tools/node.sh dev-tools/gemini-config-audit.mjs` audits the whole saved Gemini
 configuration end to end: it saves a provider exactly as the Setup screen records it
@@ -267,6 +362,13 @@ image fixture with no generator.
    **paged**: Google's list answers one page of about 50 entries and keeps the rest behind
    a `nextPageToken`, and the app follows that token, so a model that lives on a later page
    is found instead of being reported missing.
+8. `#/rewards` — the Rewards Center: claim the daily login reward, see what each reward
+   pays, and read the ledger. A second claim on the same day must pay nothing.
+9. `#/admin` — only with `ADMIN_OWNER_IDS` set (or a role granted in Admin → Roles).
+   Save a platform provider, run **Verify pricing**, enable a model whose zero pricing was
+   confirmed, then ask a question in the tutor and watch the wallet fall by the published
+   price. With no administrator configured the route answers `admin_required` — that is the
+   intended behaviour, not a failure.
 
 ## 6. Troubleshooting
 

@@ -52,6 +52,7 @@ export function dailyQuestionCard(daily, onDone) {
 
 export function loginRewardButton(claimed, onDone) {
   if (claimed) return h('span', { class: 'tag green', text: 'Daily login claimed' });
+  const amount = store.boot?.economy?.rewards?.daily_login ?? 30;
   const btn = h('button', { class: 'btn amber sm', type: 'button', onClick: async () => {
     btn.disabled = true;
     try {
@@ -62,7 +63,7 @@ export function loginRewardButton(claimed, onDone) {
       await refresh();
       onDone?.();
     } catch (error) { btn.disabled = false; errorToast(error); }
-  } }, 'Claim +30 BC daily login');
+  } }, `Claim +${amount} BC daily login`);
   return btn;
 }
 
@@ -95,6 +96,9 @@ export function originBanner(origin, note) {
   return null;
 }
 
+// The study tools the scanner offers. The price of each one is not written
+// here: it comes from the server's economy table, so the button and the
+// ledger can never disagree.
 export const ACTION_LIST = [
   { action: 'explain_simple', label: 'Simple explanation' },
   { action: 'explain_detailed', label: 'Detailed explanation' },
@@ -102,11 +106,11 @@ export const ACTION_LIST = [
   { action: 'definitions', label: 'Important definitions' },
   { action: 'summary', label: 'Chapter summary' },
   { action: 'short_notes', label: 'Short notes' },
-  { action: 'long_notes', label: 'Long notes', premium: 15 },
+  { action: 'long_notes', label: 'Long notes' },
   { action: 'mcqs', label: 'MCQs' },
   { action: 'practice', label: 'Practice questions' },
   { action: 'numericals', label: 'Solve numericals' },
   { action: 'examples', label: 'Worked examples' },
   { action: 'concepts', label: 'Key concepts' },
-  { action: 'revision', label: 'Revision sheet', premium: 15 },
+  { action: 'revision', label: 'Revision sheet' },
 ];

@@ -1,7 +1,198 @@
 # Changelog
 
 Dates follow the work sessions that produced each change; the project folder was created
-2026-10-31 and the latest session is 2026-11-05.
+2026-10-31 and the latest session is 2026-11-06.
+
+## 2026-11-06 — Phase 2: the central AI system, free models, Bridge Credits and the daily reset
+
+The brief was a second attachment: one centrally managed server-side provider
+(OpenRouter, `openrouter-central`), strict free-model routing, Bridge Credits with a
+daily login reward and a 2 BC question price, a 10-questions-per-day allowance, and a
+reset at midnight `Asia/Karachi`. The rule that shaped every change: **no second wallet
+and no second router** — the existing gateway, the existing ledger and the existing
+screens were extended, not duplicated.
+
+### Added — StudyBridge Free AI
+
+- **The platform's own provider, provisioned from a Secret.** `OPENROUTER_API_KEY`
+  (server-side only) makes `ensureCentral()` idempotently create the provider
+  `openrouter-central` at `https://openrouter.ai/api/v1` with the router model
+  `openrouter/free`, encrypted with the same AES-GCM vault that protects BYOK keys.
+  The key never reaches the browser, never enters `localStorage`, and is decrypted for
+  one outbound request and nothing else. Four optional `OPENROUTER_*` overrides let an
+  operator change the provider id, name, base URL, model, enablement or shared daily
+  quota without a redeploy.
+- **Free only when the price was actually checked.** `syncCentralCatalogue()` reads the
+  provider's own catalogue and records a model free only when the provider published
+  exactly zero for input *and* output. A model with an unknown price is recorded
+  `pricing_verified: false` and stays disabled; a paid model is recorded
+  `free_tier: false` and stays disabled. There is no path from "unknown" to "free".
+- **The router's answer is re-checked.** `openrouter/free` picks a model per request,
+  so the model the router *actually returned* is compared against the verified-free
+  list before it is allowed to answer — refused, refunded, nothing charged.
+- **Students need no key.** Settings shows a **StudyBridge Free AI** card reading
+  exactly: *"AI access is centrally managed by StudyBridge. You do not need to provide
+  your own API key."* plus what the server actually knows: configured or not, how many
+  free models are verified, questions remaining today, the BC balance and the exact
+  next reset. With no central provider configured the card says so plainly.
+- **Configured is not answering.** The admin panel reports the two separately: a
+  provider with a valid key and zero successful generations reads "configured, never
+  answered", never a green light.
+
+### Added — the daily AI allowance and the midnight reset
+
+- **`app.ai_daily_slots`** — a new table, `UNIQUE (owner_id, day, slot)`, one row per
+  question, numbered `1..10`. A request takes the next free slot for the Pakistan
+  calendar day; a failure releases it. Two requests arriving at the same instant cannot
+  take the same slot, so the cap holds under concurrency and a failed request never
+  consumes the allowance.
+- **The server decides, not the device.** `day` is computed on the server from
+  `Asia/Karachi`; the reset is 12:00 AM Pakistan Standard Time (19:00Z the day
+  before). No rolling 24-hour timer, no client-supplied day.
+- **Credits survive the reset.** Only the allowance resets; the wallet does not.
+- **The provider's own quotas are separate.** The admin panel and the docs say so
+  plainly: StudyBridge's midnight reset does not restore OpenRouter's quota, and the
+  product never implies that it does.
+
+### Changed
+
+- **Every day comparison moved off UTC.** The app-wide day/period helpers in
+  `functions/lib/util.mjs` (`dayOf`, `dayOfIso`, `nextResetIso`) now compute the
+  Pakistan calendar day, and every caller was migrated — daily login, the daily
+  question, the daily goal, the daily challenge, the weekly goal, streaks and the AI
+  allowance.
+- **`/api/ai/settings`** now carries the `central` block; **`/api/admin/overview`**
+  now carries `central` monitoring. No route was added and no route was removed — the
+  API surface is still 97 endpoints over 34 tables.
+
+### Testing
+
+- **Section M — 64 new checks** covering the 17 Phase 2 acceptance criteria against a
+  provider double: a real question is answered by the free model and charged 2 BC; a
+  failed request costs 0 and keeps the allowance; the daily login pays 30 BC exactly
+  once per Pakistan day; the 10-question cap holds, including under concurrency; the
+  reset lands on the `Asia/Karachi` boundary; credits survive it; no frontend
+  balance can be changed; one student cannot read another's wallet; no paid model is
+  ever called under any fallback; an unknown-price model is never called; a rate limit
+  is reported in the provider's own words and is not charged; no key appears in any
+  browser-facing payload; the tutor works through the central provider with no student
+  key; and two simultaneous requests cannot bypass the limit or double-charge.
+- **`SUITE: 619/619 passed`** (A 32, B 26, C 18, D 61, E 42, F 9, G 36, H 24, I 56,
+  J 72, K 65, L 114, M 64).
+
+### Not done, and stated plainly
+
+**No live AI generation has been performed.** This workspace holds no
+`OPENROUTER_API_KEY`, so no request has ever reached OpenRouter and no real answer has
+been produced. The integration is implemented and covered against a provider double;
+it needs one Secret and one live question to confirm end to end.
+
+## 2026-11-06 — the central AI gateway and the Bridge Credits economy
+
+The brief was one attachment in seven parts: a wallet that students cannot edit, a
+single gateway behind every AI request, an administrator who can see and change the
+economy, a Free Model Policy that cannot be talked around, and sixteen acceptance
+criteria to be proved before anything is called done. Nothing existing was rewritten:
+the router, the wallet, the ledger and the eleven screens stayed where they were, and
+the new parts sit in front of them.
+
+### Added — the gateway
+
+- **`functions/lib/gateway.mjs`.** One place every AI request goes through. It holds the
+  platform-side providers (`app.ai_providers`), the approved model registry
+  (`app.ai_models`), the health history and the analytics. A model is selectable only
+  while its **verified** input and output prices are both exactly zero, the provider
+  published it, an administrator enabled it and it is not cooling down.
+- **Pricing verification.** `POST /api/admin/providers/:id/verify` reads the provider's
+  own catalogue and marks a model free only when the provider published exactly zero on
+  both sides. `PATCH /api/admin/models/:row` refuses to enable an unverified model
+  (`409 pricing_not_verified`) — there is no switch that turns a paid fallback on.
+- **The OpenRouter free router is checked on every answer.** `openrouter/free` is not
+  priced itself; it picks a model per request. So the gateway compares the model the
+  router *actually returned* against the verified-free list, and refuses the answer if
+  that model is not on it — refused, refunded, nothing charged.
+- **Provider management** (admin only): add, edit and remove providers; Base URL and
+  protocol (`openai` / `openrouter` / `gemini`); add and remove models; enable and
+  disable; **Test connection** (one real request — a catalogue is not proof a key
+  works); **Verify pricing**.
+- **Monitoring**: provider health, rate-limit status, request and failure counts, last
+  successful request, last error, and the request history behind them.
+
+### Added — the credits economy
+
+- **`functions/lib/economy.mjs`.** The published price of every AI feature and the
+  published value of every reward, plus the limits. An administrator changes a price or
+  a limit as a **data edit** — it applies to the next request, with no redeploy.
+- **Reserve → settle → refund** in `functions/lib/rewards.mjs`. The credits are held
+  *before* the model is contacted, settled only on a real answer, and refunded
+  automatically when the generation fails. A reservation that never took the credits is
+  marked failed and never refunded, so a student is not paid for a request that cost
+  nothing. A repeated request key replays the first outcome instead of spending again.
+- **A ledger that cannot contradict the wallet.** The balance change is a
+  compare-and-set on the wallet row with a bounded retry and jitter, so simultaneous
+  requests converge instead of conflicting; a ledger row that outlived a balance change
+  that never happened is deleted rather than left behind.
+- **Rewards** with a unique claim row per `(owner, reward, period)`: daily login 30 BC,
+  daily learning question 10 BC, study session 15 BC, daily goal 20 BC, daily challenge
+  15 BC, seven-day streak 100 BC, weekly goal 50 BC. A repeat claim — including two
+  fired at the same instant — pays once.
+- **Pricing**: basic question 2, concept explanation 2, problem-solving explanation 2,
+  short passage summary 4, chapter summary 8, revision notes 6, practice quiz 5,
+  two-model advanced check 10 BC. The price is shown **before** the student submits.
+
+### Added — the screens
+
+- **Rewards Center `#/rewards`**: every reward, what it pays, how it is earned, whether
+  it has been claimed today.
+- **Admin Dashboard `#/admin`**: economy analytics, provider management, provider
+  monitoring, economy controls and roles. The nav link appears only when the **server**
+  reports the role; the role itself lives in `app.user_roles` and is bootstrapped from
+  the `ADMIN_OWNER_IDS` Secret. A student who finds the URL gets the same
+  `403 admin_required` as one who never found it.
+- **The tutor** now shows the live balance, the cost of the action about to run and the
+  display name of the model that will answer.
+
+### Added — the schema
+
+`schema/central-gateway.sql`, applied **after** `schema/studybridge.sql`: 8 platform-side
+tables (`user_roles`, `ai_providers`, `ai_models`, `ai_requests`, `ai_usage_limits`,
+`provider_health_logs`, `reward_claims`, `economy_settings`) and 9 indexes. It adds no
+column to an existing table, so it applies cleanly to a schema that already carries the
+base migration. `app.wallets`, `app.transactions`, `app.streaks`, `app.achievements`
+and `app.daily_states` are reused, not duplicated. *(A ninth table,
+`app.ai_daily_slots`, was added to this same file in the Phase 2 session above — apply
+the current file, not this description of it.)*
+
+### Fixed
+
+- **The gateway could never answer.** `providerRows()` did not select `key_cipher`, so
+  the router was handed a provider with no cipher, `codec.decrypt(undefined)` threw and
+  every platform answer died as `transport error` — indistinguishable from "the
+  provider is down". The cipher is now loaded for the router only; the public admin
+  response still carries `key_hint` and no cipher.
+- **A ledger row could outlive its balance change.** `applyDelta` inserted the
+  transaction, then failed to move the balance, leaving a spend in the history that the
+  balance never reflected. The row is now deleted before the failure is raised, the CAS
+  bound went from 6 to 25, and a 0–4 ms jittered pause breaks the lockstep so
+  concurrent requests converge instead of retrying in step.
+- **A refused debit left the reservation pending.** It now closes as `failed`, and
+  `refundAi` refuses to refund a request that was never charged.
+
+### Verified
+
+`SUITE: 554/554 passed` (A 32, B 26, C 18, D 61, E 42, F 9, G 36, H 24, I 56, J 72,
+K 65, **L 113**). Section **L** is the acceptance suite for all sixteen criteria: an
+administrator configures a provider through the admin API, the provider's own catalogue
+is verified, and a student then asks real questions — each assertion reads a
+server-written wallet row, a ledger row or a recorded outbound request, never a mock
+answer. `js-syntax`, `js-imports` and `css-classes` clean.
+
+### Still blocked
+
+Publication. `ensure_backend` returns `sites_quota_exceeded` (`backend_sites` used 0 /
+limit 0) and the schema cannot be applied without it, so the gateway and the economy
+have been proven against the real handlers on an in-memory data layer and not against
+the deployed Postgres.
 
 ## 2026-11-05 — the Gemini configuration was audited end to end, and the model list turned out to be paged
 

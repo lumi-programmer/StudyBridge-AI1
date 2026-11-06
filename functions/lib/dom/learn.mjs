@@ -3,7 +3,7 @@
 // client cannot claim a result it did not earn.
 import { GAME_CATALOG, GAME_RULES } from '../content.mjs';
 import { bankQuiz, buildLocalQuiz, gradeAnswers, publicQuestions, sanitizeQuestions } from '../quiz.mjs';
-import { clamp, dayOf, nowIso, text as asText, truncate, uuid as asUuid } from '../util.mjs';
+import { clamp, dayOf, dayOfIso, nowIso, text as asText, truncate, uuid as asUuid } from '../util.mjs';
 
 const MODES = ['deep', 'custom', 'normal'];
 const DIFFICULTIES = ['easy', 'normal', 'hard'];
@@ -43,7 +43,7 @@ function percent(score, total) {
   return total ? Math.round((score / total) * 100) : 0;
 }
 
-export function createLearning({ add, ai, db, fail, generateGame, gradeGame, rows, rewards }) {
+export function createLearning({ add, ai, db, fail, generateGame, gradeGame, rows, rewards, economy }) {
   async function quizRow(user, id, columns) {
     const key = asUuid(id) || fail('invalid_input', 400);
     const found = rows(await db.from('quizzes').select(columns).eq('id', key).eq('owner_id', user.id).limit(1));
@@ -51,19 +51,21 @@ export function createLearning({ add, ai, db, fail, generateGame, gradeGame, row
     return found[0];
   }
 
-  async function saveQuiz(user, made, { spaceId, bookId, chapterId, provider, model }) {
+  async function saveQuiz(user, made, { spaceId, bookId, chapterId, provider, model, extra = {}, onSaved = null }) {
     const quizId = crypto.randomUUID();
     rows(await db.from('quizzes').insert({
       id: quizId, owner_id: user.id, space_id: spaceId, book_id: bookId, chapter_id: chapterId,
       title: truncate(made.title, 120), questions: made.questions, origin: made.origin,
       provider: provider || '', model: model || '', created_at: nowIso(),
     }));
+    if (typeof onSaved === 'function') onSaved(quizId);
     return Response.json({
       quiz_id: quizId,
       title: made.title,
       origin: made.origin,
       note: made.note || null,
       questions: publicQuestions(made.questions),
+      ...extra,
     }, { status: 201 });
   }
 
@@ -158,6 +160,29 @@ export function createLearning({ add, ai, db, fail, generateGame, gradeGame, row
     }
 
     if (!pages.length) fail('no_material', 409, 'AI questions need scanned text. Scan a chapter first.');
+    const price = await economy.price('practice_quiz');
+    if (price === null) fail('invalid_input', 400, 'Practice quizzes have no configured price right now.');
+    // A client key makes the debit replay-safe. A client that sends none still
+    // gets a quiz; the server makes the key, so it is charged exactly once.
+    const requestKey = asUuid(input.client_key) || crypto.randomUUID();
+    const reservation = await rewards.reserveAi(user.id, {
+      feature: 'practice_quiz', requestKey, credits: price, label: 'Practice quiz',
+    });
+    if (reservation.replayed) {
+      if (reservation.state === 'settled') {
+        const earlier = await rewards.aiRequest(user.id, reservation.key);
+        const savedId = asUuid(earlier?.detail);
+        if (savedId) {
+          const saved = await quizRow(user, savedId, `${QUIZ_COLUMNS},questions`);
+          return Response.json({
+            quiz_id: saved.id, title: saved.title, origin: saved.origin,
+            questions: publicQuestions(saved.questions), credits_spent: 0, replayed: true,
+            note: 'This quiz was already generated and paid for. The same quiz is shown again — no credits were taken a second time.',
+          });
+        }
+      }
+      fail('idempotency_conflict', 409, 'This quiz request is already running. Wait for it to finish instead of sending it again.');
+    }
     const material = pages.map(page =>
       `[page ${page.page_number}${page.chapter_title ? `, ${page.chapter_title}` : ''}] ${truncate(page.text, 1200)}`).join('\n\n').slice(0, 7000);
     try {
@@ -169,7 +194,8 @@ export function createLearning({ add, ai, db, fail, generateGame, gradeGame, row
       const list = Array.isArray(generated.json) ? generated.json : generated.json?.questions;
       const cleaned = sanitizeQuestions(list, pages);
       if (!cleaned.length) fail('extraction_failed', 502, 'The model returned no usable questions. Try again, or use the free practice bank.');
-      return saveQuiz(user, {
+      let quizId = '';
+      const saved = await saveQuiz(user, {
         title: customTitle || (pages[0]?.chapter_title ? `${pages[0].chapter_title} quiz` : 'Quiz from your scans'),
         origin: 'ai',
         note: 'Generated from your scanned text by the model shown. Check it against your book.',
@@ -177,15 +203,32 @@ export function createLearning({ add, ai, db, fail, generateGame, gradeGame, row
       }, {
         spaceId, bookId, chapterId,
         provider: generated.result.provider?.provider_key || '', model: generated.result.model?.model_id || '',
+        onSaved: id => { quizId = id; },
       });
+      await rewards.settleAi(user.id, reservation.key, {
+        providerKey: generated.result.provider?.provider_key || '',
+        modelId: generated.result.model?.model_id || '',
+        statusCode: 200,
+        detail: quizId,
+      });
+      const payload = await saved.json();
+      return Response.json({ ...payload, credits_spent: price, balance: (await rewards.ensureWallet(user.id)).balance }, { status: 201 });
     } catch (error) {
       // Free fallback only for the configuration/limit failures students cannot fix.
       if (['no_provider_configured', 'credentials_not_configured', 'rate_limited', 'daily_limit_reached'].includes(error?.code)) {
+        await rewards.refundAi(user.id, reservation.key, { reason: error?.code || 'provider_unavailable', feature: 'practice_quiz' });
         const made = buildLocalQuiz(pages, { count, title: customTitle || 'Quiz from your scanned material' });
         if (made.questions.length >= 3) {
-          return saveQuiz(user, made, { spaceId, bookId, chapterId });
+          return saveQuiz(user, made, {
+            spaceId, bookId, chapterId,
+            extra: {
+              credits_spent: 0,
+              note: 'No credits were deducted: this quiz was built from your own scanned text, not by a model.',
+            },
+          });
         }
       }
+      await rewards.refundAi(user.id, reservation.key, { reason: error?.code || 'generation_failed', feature: 'practice_quiz' });
       throw error;
     }
   });
@@ -377,14 +420,22 @@ export function createLearning({ add, ai, db, fail, generateGame, gradeGame, row
     const qualifying = minutes >= SESSION_REWARD_MINUTES;
     let capNote = null;
     if (qualifying && state.sessions < SESSION_REWARD_PER_DAY) {
-      const reward = await rewards.applyDelta(user.id, {
-        reason: `session:${key}`, label: `Focus session · ${minutes} min`, amount: 15,
-        meta: { minutes, mode: session.mode },
-      });
-      state = await rewards.patchDay(user.id, state, { sessions: state.sessions + 1 });
-      if (!reward.replayed && reward.tx) {
-        awarded.push({ kind: 'session', amount: reward.tx.amount, label: 'Study session' });
-        if (reward.cap_note) capNote = reward.cap_note;
+      const amount = await rewards.rewardFor('study_session', 15);
+      const claim = await rewards.claimReward(user.id, 'study_session', `${day}#${state.sessions + 1}`, amount);
+      if (claim.claimed && amount > 0) {
+        const reward = await rewards.applyDelta(user.id, {
+          reason: `session:${key}`, label: `Focus session · ${minutes} min`, amount,
+          meta: { minutes, mode: session.mode, type: 'learning_reward' },
+        });
+        state = await rewards.patchDay(user.id, state, { sessions: state.sessions + 1 });
+        if (!reward.replayed && reward.tx) {
+          awarded.push({ kind: 'session', amount: reward.tx.amount, label: 'Study session' });
+          if (reward.cap_note) capNote = reward.cap_note;
+        }
+      } else {
+        capNote = amount === 0
+          ? 'Study session rewards are switched off right now, so no credits were added.'
+          : 'This session reward was already claimed today.';
       }
     } else if (qualifying) {
       capNote = `Two credited sessions is the daily maximum (${SESSION_REWARD_PER_DAY}). Extra sessions still count as study time.`;
@@ -436,7 +487,7 @@ export function createLearning({ add, ai, db, fail, generateGame, gradeGame, row
       best.set(row.game, Math.max(best.get(row.game) || 0, row.best_score || 0, row.score || 0));
       played.set(row.game, (played.get(row.game) || 0) + 1);
     }
-    const today = sessions.filter(row => String(row.started_at).slice(0, 10) === day);
+    const today = sessions.filter(row => dayOfIso(row.started_at) === day);
     const rewarded = today.filter(row => (row.reward || 0) > 0);
     return Response.json({
       games: GAME_CATALOG.map(item => ({
@@ -521,7 +572,7 @@ export function createLearning({ add, ai, db, fail, generateGame, gradeGame, row
 
     const today = rows(await db.from('game_sessions')
       .select('id,reward,started_at').eq('owner_id', user.id).order('started_at', { ascending: false }).limit(200)) || [];
-    const todayRewarded = today.filter(item => String(item.started_at).slice(0, 10) === day && (item.reward || 0) > 0 && item.id !== sessionId);
+    const todayRewarded = today.filter(item => dayOfIso(item.started_at) === day && (item.reward || 0) > 0 && item.id !== sessionId);
     const earnedToday = todayRewarded.reduce((acc, item) => acc + (item.reward || 0), 0);
     let grantable = graded.reward;
     let capNote = null;
@@ -547,7 +598,7 @@ export function createLearning({ add, ai, db, fail, generateGame, gradeGame, row
     if (grantable > 0) {
       await rewards.applyDelta(user.id, {
         reason: `game:${sessionId}`, label: `${catalogName(game)} · ${graded.score} points`, amount: grantable,
-        meta: { game, difficulty: row.difficulty, score: graded.score },
+        meta: { game, difficulty: row.difficulty, score: graded.score, type: 'learning_reward' },
       });
     }
     const achievement = await rewards.grantAchievement(user.id, 'first_game');

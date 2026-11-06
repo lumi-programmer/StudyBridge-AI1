@@ -4,7 +4,7 @@
 import { api } from '../api.js';
 import { refresh, store } from '../store.js';
 import { MODES, currentMode, resolved, setMode } from '../theme.js';
-import { confirmSheet, emptyState, errorCard, errorToast, field, h, microToText, num, openSheet, pageHead, pct, select, sheetTitle, timeAgo, toast } from '../ui.js';
+import { confirmSheet, emptyState, errorCard, errorToast, field, h, microToText, num, openSheet, pageHead, pct, select, sheetTitle, timeAgo, toast, untilLabel } from '../ui.js';
 
 const LEVELS = [['beginner', 'Total beginner'], ['simple', 'Simple'], ['school', 'School textbook'], ['detailed', 'Detailed'], ['advanced', 'Advanced'], ['example', 'Worked examples']];
 const NOTIFS = [['daily_goal', 'Daily goal reminder'], ['daily_question', 'Daily question reminder'], ['breaks', 'Break reminders'], ['challenges', 'Challenge reminders'], ['streak', 'Streak reminders']];
@@ -140,11 +140,49 @@ async function loadProviders(host, navigate, reloadProviders) {
   host.replaceChildren();
   let settings;
   try { settings = await api.get('/api/ai/settings'); } catch (error) { host.replaceChildren(errorCard(error, () => loadProviders(host, navigate, reloadProviders))); return; }
+  host.appendChild(centralAiCard(settings.central, settings.daily_ai));
   host.appendChild(trialCard(settings.trial));
   host.appendChild(byokCard(settings, reloadProviders));
   for (const provider of settings.providers) host.appendChild(providerCard(provider, reloadProviders));
   host.appendChild(routerCard(settings));
   host.appendChild(usageCard(settings));
+}
+
+// StudyBridge Free AI: the connection every student gets without an account,
+// a key or a model setup of their own. What it says about itself is read
+// from the server, never assumed by the page.
+function centralAiCard(central, daily) {
+  const c = central || {};
+  const on = c.configured === true;
+  const ready = c.available === true;
+  const state = !on
+    ? h('span', { class: 'tag grey', text: 'not connected yet' })
+    : ready
+      ? h('span', { class: 'tag green', text: 'available now' })
+      : c.quota_blocked
+        ? h('span', { class: 'tag amber', text: 'busy right now' })
+        : h('span', { class: 'tag rose', text: 'not answering yet' });
+  const meters = on ? h('div', { class: 'grid cols-3' },
+    h('div', { class: 'stat teal' }, h('span', { class: 'stat-label', text: 'Verified free models' }),
+      h('b', { text: num(c.free_models) }), h('small', { text: 'price checked at $0 on the provider’s own list' })),
+    h('div', { class: 'stat' }, h('span', { class: 'stat-label', text: 'Questions left today' }),
+      h('b', { text: daily?.remaining === null || daily?.remaining === undefined ? '—' : `${num(daily.remaining)} / ${num(daily.limit)}` }),
+      h('small', { text: `${num(daily?.used ?? 0)} used today` })),
+    h('div', { class: 'stat' }, h('span', { class: 'stat-label', text: 'Next reset' }),
+      h('b', { class: 'tiny', text: '00:00 Pakistan time' }),
+      h('small', { text: untilLabel(daily?.resets_at) }))) : null;
+  return h('section', { class: 'card stack' },
+    h('div', { class: 'card-head' }, h('h3', { text: 'StudyBridge Free AI' }), h('span', { class: 'spacer' }), state),
+    h('p', { class: 'tiny', text: 'AI access is centrally managed by StudyBridge. You do not need to provide your own API key.' }),
+    h('p', { class: 'tiny muted', text: c.note || 'Only models whose $0 input and output price was checked against the provider’s own catalogue can answer. A model whose price is unknown is never used, and a paid model is never substituted.' }),
+    meters,
+    on && !ready ? h('div', { class: 'banner warn' }, h('div', {},
+      h('b', { text: c.quota_blocked ? 'The shared free allowance is used up' : 'The free models are not answering yet' }),
+      h('span', { text: c.quota_blocked
+        ? 'StudyBridge AI is temporarily busy. Please try again later — the provider’s own allowance refills on its schedule, not at midnight.'
+        : c.message || 'An administrator has to finish the platform setup on the server.' }))) : null,
+    on && c.last_error ? h('div', { class: 'banner bad' }, h('div', {}, h('b', { text: 'Last error on the platform connection' }), h('span', { text: c.last_error }))) : null,
+    h('p', { class: 'tiny muted', text: 'The key lives on the server only. It is never sent to this browser and cannot be read from this page.' }));
 }
 
 function byokCard(settings, reloadProviders) {

@@ -1,7 +1,7 @@
 // Settings → AI Providers (bring your own key). Keys are encrypted at rest and
 // never leave the Function: every read returns a masked hint, so no browser
 // response, log or database record an ordinary student can read contains a key.
-import { clamp, dayOf, modelIdentifier, nowIso, text as asText, uuid as asUuid } from '../util.mjs';
+import { clamp, dayOf, dayOfIso, modelIdentifier, nowIso, text as asText, uuid as asUuid } from '../util.mjs';
 
 const TIERS = ['economy', 'standard', 'premium'];
 
@@ -269,7 +269,7 @@ export function createProviders({ add, ai, db, fail, rows }) {
     const day = dayOf();
     const today = rows(await db.from('ai_usage').select('ok,purpose,created_at').eq('owner_id', user.id)
       .order('created_at', { ascending: false }).limit(400)) || [];
-    const todays = today.filter(row => String(row.created_at).slice(0, 10) === day);
+    const todays = today.filter(row => dayOfIso(row.created_at) === day);
     const cacheRows = rows(await db.from('ai_cache').select('hits').eq('owner_id', user.id).limit(200)) || [];
     const enabledModels = providers.reduce((acc, provider) => acc + (provider.models || []).filter(model => model.enabled).length, 0);
     const visionModels = providers.reduce((acc, provider) => acc + (provider.models || []).filter(model => model.enabled && model.vision).length, 0);
@@ -277,8 +277,18 @@ export function createProviders({ add, ai, db, fail, rows }) {
     const coolingModels = providers.reduce((acc, provider) => acc + (provider.models || []).filter(model =>
       model.enabled && Date.parse(model.cooldown_until || '') > nowMs).length, 0);
     const trial = await ai.trialStatus(user.id);
+    // The centrally managed AI. The key stays on the server; the student sees
+    // only whether it is connected and how many free models are verified.
+    const central = scoped.gateway ? await scoped.gateway.centralState().catch(() => null) : null;
     return Response.json({
       trial: { ...trial, byok_connected: providers.some(provider => provider.enabled) },
+      central: central ? {
+        ...central,
+        title: 'StudyBridge Free AI',
+        headline: 'AI access is centrally managed by StudyBridge. You do not need to provide your own API key.',
+        note: 'Only models whose $0 input and output price was checked against the provider’s own catalogue can answer. A model whose price is unknown is never used, and a paid model is never substituted.',
+      } : null,
+      daily_ai: await scoped.rewards.dailyUsage(user.id),
       profile: {
         language: profile.language, explanation_level: profile.explanation_level,
         ai_limit_per_day: profile.ai_limit_per_day, onboarded: profile.onboarded,
@@ -302,7 +312,7 @@ export function createProviders({ add, ai, db, fail, rows }) {
           ? 'No enabled model is marked as vision-capable, so photo scans cannot be transcribed yet. Use PDF text layers or enable a vision model.'
           : null,
       },
-      retry_policy: ai.policy(),
+      retry_policy: await ai.policy(),
       usage: {
         ...totals,
         cost_estimate_display: microToReadable(totals.costMicro),

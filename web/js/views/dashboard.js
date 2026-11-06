@@ -1,7 +1,7 @@
 import { api } from '../api.js';
 import { store } from '../store.js';
 import { meter } from '../charts.js';
-import { colorDot, emptyState, errorCard, h, loadingCard, minutesLabel, num, pageHead, timeAgo } from '../ui.js';
+import { colorDot, emptyState, errorCard, h, loadingCard, minutesLabel, num, pageHead, timeAgo, untilLabel } from '../ui.js';
 import { current, MODE_LABEL } from '../focus.js';
 import { dailyQuestionCard, loginRewardButton } from './shared.js';
 
@@ -25,6 +25,8 @@ export async function render(root, { navigate }) {
     body.replaceChildren(errorCard(error, () => { root.replaceChildren(); render(root, { navigate }); }));
     return;
   }
+
+  const freeAi = freeAiCard(boot);
 
   const timer = current();
   const stats = h('div', { class: 'grid cols-4' },
@@ -83,7 +85,31 @@ export async function render(root, { navigate }) {
     stats,
     h('div', { class: 'grid side' },
       h('div', { class: 'stack' }, dailyQuestionCard(daily, () => {}), h('div', { class: 'grid cols-2' }, spaces, books)),
-      h('div', { class: 'stack' }, goal, challenge, quick, reminderCard)));
+      h('div', { class: 'stack' }, freeAi, goal, challenge, quick, reminderCard)));
+}
+
+// StudyBridge Free AI on the dashboard: what it is, how many questions are
+// left today and when the counter comes back. Everything is read from the
+// server, so an unconfigured platform shows as unconfigured.
+function freeAiCard(boot) {
+  const daily = boot.daily_ai || {};
+  const central = boot.free_models?.central || {};
+  const connected = central.configured === true;
+  const state = !connected ? h('span', { class: 'tag grey', text: 'not connected yet' })
+    : central.available ? h('span', { class: 'tag green', text: 'available now' })
+    : central.quota_blocked ? h('span', { class: 'tag amber', text: 'busy right now' })
+    : h('span', { class: 'tag rose', text: 'not answering yet' });
+  return h('section', { class: 'card' },
+    h('div', { class: 'card-head' }, h('h3', { text: 'StudyBridge Free AI' }), h('span', { class: 'spacer' }), state),
+    h('p', { class: 'tiny', style: { margin: '0 0 8px' }, text: 'AI access is centrally managed by StudyBridge. You do not need to provide your own API key.' }),
+    h('div', { class: 'grid cols-2' },
+      h('div', { class: 'stat teal' }, h('span', { class: 'stat-label', text: 'Questions left today' }),
+        h('b', { text: daily.limit ? num(daily.remaining ?? 0) : '—' }),
+        h('small', { text: daily.limit ? `${num(daily.used ?? 0)} of ${num(daily.limit)} used today` : 'no daily cap set' })),
+      h('div', { class: 'stat' }, h('span', { class: 'stat-label', text: 'Next reset' }),
+        h('b', { class: 'tiny', text: '00:00 Pakistan time' }),
+        h('small', { text: untilLabel(boot.next_reset) }))),
+    h('p', { class: 'tiny muted', style: { margin: '8px 0 0' }, text: connected ? `${central.free_models} verified free model${central.free_models === 1 ? '' : 's'}, each checked at $0 on the provider’s own list. A paid model is never substituted.` : 'An administrator has to set the platform AI key on the server. Notes, quizzes from your own text, focus, games and progress need no key at all.' }));
 }
 
 function stat(label, value, tone, sub, href) {
@@ -100,5 +126,5 @@ function onboarding() {
     h('ol', { class: 'steps' },
       h('li', {}, h('b', { text: 'Make a space' }), ' for a subject, like “Class 10 Physics”. ', h('a', { href: '#/spaces?new=1', text: 'Create one' })),
       h('li', {}, h('b', { text: 'Scan your book' }), ' — cover, contents, then a chapter. PDFs with text are read exactly. ', h('a', { href: '#/scanner', text: 'Open scanner' })),
-      h('li', {}, h('b', { text: 'Connect an AI key (optional)' }), ' to get explanations and notes. Free tools work without one. ', h('a', { href: '#/settings', text: 'Settings' }))));
+      h('li', {}, h('b', { text: 'Ask the tutor' }), ' — StudyBridge Free AI answers without a key, an account or a model setup of your own. ', h('a', { href: '#/tutor', text: 'Open tutor' }))));
 }

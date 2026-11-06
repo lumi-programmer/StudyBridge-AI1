@@ -7,7 +7,7 @@
 //   2. Free Trial — a platform-owned fallback built from Secrets the operator
 //      set. It is strictly metered per student, and if the Secrets are absent it
 //      reports that plainly instead of pretending to work.
-import { clamp, identifier, int as toInt, modelIdentifier, normaliseApiKey, sha256Hex, text as asText, truncate } from './util.mjs';
+import { clamp, dayOf, dayOfIso, identifier, int as toInt, modelIdentifier, normaliseApiKey, sha256Hex, text as asText, truncate } from './util.mjs';
 
 const PROVIDER_TYPES = ['openai', 'gemini', 'azure', 'custom'];
 const TRIAL_PROVIDER_KEY = 'free_trial';
@@ -20,6 +20,9 @@ const TRIAL_SECRETS = {
 const TIERS = { economy: 1, standard: 2, premium: 3 };
 const TIER_ORDER = [1, 2, 3];
 const MAX_CANDIDATES = 3;
+// How many of the platform's free models may stand behind the student's own
+// provider as a fallback. Small on purpose: each one is a real provider call.
+const MAX_PLATFORM_CANDIDATES = 2;
 const CHARS_PER_TOKEN = 4;
 
 // Outbound policy. Each number is an operator knob (a Site Secret) so an outage
@@ -112,7 +115,7 @@ const SERVER_PROSE = /\b(server error|internal error|bad gateway|upstream|servic
 // instead of the catch-all "no configured provider answered".
 const TERMINAL_CODES = new Set(['provider_auth_failed', 'provider_model_not_found', 'provider_access_denied',
   'provider_rate_limited', 'provider_quota_exhausted', 'provider_unavailable', 'provider_timeout',
-  'provider_unreachable', 'provider_bad_request']);
+  'provider_unreachable', 'provider_bad_request', 'invalid_ai_response']);
 
 function modelLabel(failure) {
   return `${failure.model || 'The model'}${failure.provider ? ` at ${failure.provider}` : ''}`;
@@ -318,7 +321,7 @@ export function parseJsonBlock(text) {
 }
 
 // Provider-specific request and response formats, normalised to one shape.
-const ADAPTERS = {
+export const ADAPTERS = {
   openai: {
     build({ base, model, apiKey, prompt, system, images, maxTokens = 1800 }) {
       const messages = [];
@@ -345,7 +348,28 @@ const ADAPTERS = {
         text: typeof content === 'string' ? content : content?.map?.(p => p.text || '').join('') ?? null,
         inputTokens: toInt(usage.prompt_tokens, { min: 0, max: 1e7, fallback: 0 }),
         outputTokens: toInt(usage.completion_tokens, { min: 0, max: 1e7, fallback: 0 }),
+        // The provider names the model that answered. A router uses that name to
+        // say which model it actually picked, so it is never guessed.
+        model: typeof json?.model === 'string' ? json.model : null,
       };
+    },
+  },
+  // OpenRouter speaks the OpenAI chat protocol and asks for two extra headers
+  // that identify the application. Its free router answers with whichever free
+  // model it picked, and the response names it — which is what the gateway
+  // checks against the verified-free list before the answer is accepted.
+  openrouter: {
+    build(options) {
+      const built = ADAPTERS.openai.build(options);
+      built.init.headers = {
+        ...built.init.headers,
+        'HTTP-Referer': 'https://schoolplanner.pk',
+        'X-Title': 'StudyBridge AI',
+      };
+      return built;
+    },
+    parse(json) {
+      return ADAPTERS.openai.parse(json);
     },
   },
   gemini: {
@@ -386,6 +410,11 @@ const ADAPTERS = {
 
 export function createAi(ctx) {
   const { db, fail, rows, env, crypto: codec } = ctx;
+  // The gateway is the platform's own free-model registry; the economy holds
+  // the prices and limits. Both are injected, so this module never has to know
+  // where they live.
+  const gateway = ctx.gateway || null;
+  const economy = ctx.economy || null;
   // The gateway injects its own fetch so outbound calls stay inside the runtime's
   // permissions; the global is only a fallback for direct embedding.
   const fetchImpl = ctx.fetch
@@ -401,7 +430,7 @@ export function createAi(ctx) {
   // The retry and cooldown behaviour actually in force, for Settings to show.
   // Every value is a Site Secret, so an operator can widen the wait during a
   // provider outage without a redeploy.
-  function policy() {
+  async function policy() {
     return {
       timeout_ms: setting('AI_TIMEOUT_MS'),
       retry_attempts: setting('AI_RETRY_ATTEMPTS'),
@@ -412,7 +441,7 @@ export function createAi(ctx) {
       cooldown_ms: setting('MODEL_COOLDOWN_MS'),
       cooldown_max_ms: setting('MODEL_COOLDOWN_MAX_MS'),
       recovery_probe_ms: setting('AI_RECOVERY_PROBE_MS'),
-      max_concurrent: setting('AI_MAX_CONCURRENT'),
+      max_concurrent: await concurrencyLimit(),
       // Not a knob: the floor no setting may go below, so a zero-backoff
       // configuration still cannot re-send a request instantly.
       min_retry_pause_ms: MIN_RETRY_PAUSE_MS,
@@ -702,12 +731,12 @@ export function createAi(ctx) {
   // Budget is measured from the usage ledger the router already writes, so a
   // student cannot reset it by clearing local state or switching tabs.
   async function trialUsage(ownerId, limit) {
-    const day = new Date().toISOString().slice(0, 10);
+    const day = dayOf();
     const recent = rows(await db.from('ai_usage').select('created_at')
       .eq('owner_id', ownerId).eq('provider_key', TRIAL_PROVIDER_KEY)
       .order('created_at', { ascending: false }).limit(limit + 5)) || [];
     return {
-      used_today: recent.filter(row => String(row.created_at).slice(0, 10) === day).length,
+      used_today: recent.filter(row => dayOfIso(row.created_at) === day).length,
       used_total: recent.length,
     };
   }
@@ -997,13 +1026,23 @@ export function createAi(ctx) {
     }).filter(Boolean);
   }
 
-  async function persistStatus(ownerId, providerId, status, message) {
+  // A platform provider is a row in the platform registry, not in the
+  // student's own provider table, so the status of the two is written to two
+  // different tables. The rule is the same for both: only the server writes.
+  async function persistStatus(ownerId, providerId, status, message, { platform = false } = {}) {
     // Operator trace of what the provider really said, with the status code and
     // the redacted detail. Successes are not logged, and no key can reach here.
     if (message && !String(status).startsWith('ok')) {
       console.warn(`studybridge provider failure [${status}] ${truncate(message, 200)}`);
     }
     try {
+      if (platform) {
+        await db.from('ai_providers').update({
+          last_status: status, last_error: truncate(message, 400),
+          checked_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+        }).eq('id', providerId).select('id');
+        return;
+      }
       await db.from('providers').update({
         last_status: status, last_error: truncate(message, 400), checked_at: new Date().toISOString(),
       }).eq('id', providerId).eq('owner_id', ownerId).select('id');
@@ -1019,28 +1058,40 @@ export function createAi(ctx) {
     return Number.isFinite(until) && until > now;
   }
 
-  async function markCooling(ownerId, modelRowId, { code, retryAfterMs: suggested }) {
+  async function markCooling(ownerId, modelRowId, { code, retryAfterMs: suggested, platform = false }) {
     if (!modelRowId) return 0;
     let streak = 1;
     try {
-      const found = rows(await db.from('models').select('fail_streak').eq('id', modelRowId).eq('owner_id', ownerId).limit(1));
+      const found = platform
+        ? rows(await db.from('ai_models').select('fail_streak').eq('id', modelRowId).limit(1))
+        : rows(await db.from('models').select('fail_streak').eq('id', modelRowId).eq('owner_id', ownerId).limit(1));
       streak = (Number(found?.[0]?.fail_streak) || 0) + 1;
     } catch { streak = 1; }
     const grown = setting('MODEL_COOLDOWN_MS') * 2 ** Math.min(streak - 1, 6);
     const ms = Math.min(setting('MODEL_COOLDOWN_MAX_MS'), Math.max(grown, suggested || 0));
     try {
-      await db.from('models').update({
+      const patch = {
         fail_streak: streak,
         cooldown_until: new Date(Date.now() + ms).toISOString(),
         cooldown_reason: String(code || '').slice(0, 48),
-      }).eq('id', modelRowId).eq('owner_id', ownerId).select('id');
+      };
+      if (platform) {
+        await db.from('ai_models').update(patch).eq('id', modelRowId).select('id');
+      } else {
+        await db.from('models').update(patch).eq('id', modelRowId).eq('owner_id', ownerId).select('id');
+      }
     } catch { /* routing state is best-effort; a lost write only means no cooldown */ }
     return ms;
   }
 
-  async function clearCooling(ownerId, modelRowId) {
+  async function clearCooling(ownerId, modelRowId, { platform = false } = {}) {
     if (!modelRowId) return;
     try {
+      if (platform) {
+        await db.from('ai_models').update({ fail_streak: 0, cooldown_until: null, cooldown_reason: '' })
+          .eq('id', modelRowId).select('id');
+        return;
+      }
       await db.from('models').update({ fail_streak: 0, cooldown_until: null, cooldown_reason: '' })
         .eq('id', modelRowId).eq('owner_id', ownerId).select('id');
     } catch { /* nothing to clear */ }
@@ -1334,6 +1385,18 @@ export function createAi(ctx) {
     return 1;
   }
 
+  // The platform's own free models, in the same shape the student's own
+  // providers use. A gateway that is not configured contributes nothing, so
+  // the router behaves exactly as it did before one was installed.
+  async function platformCandidates(needVision) {
+    if (!gateway) return [];
+    try {
+      const list = await gateway.candidates({ needVision });
+      return Array.isArray(list) ? list : [];
+    } catch { /* an unavailable registry is not a reason to fail the request */ }
+    return [];
+  }
+
   async function candidates(ownerId, { needVision = false, minTier = 1, modelRowId = null }) {
     if (modelRowId) {
       const chosen = rows(await db.from('models').select('id,provider_id,model_id,model_name,tier,vision,input_micro_per_1k,output_micro_per_1k')
@@ -1343,6 +1406,7 @@ export function createAi(ctx) {
       if (provider.enabled !== true) fail('provider_disabled', 409);
       return [{ model: chosen[0], provider }];
     }
+    const platform = await platformCandidates(needVision);
     const providers = rows(await db.from('providers')
       .select('id,api_name,provider_key,base_url,wire,key_cipher,enabled,is_default')
       .eq('owner_id', ownerId).eq('enabled', true).order('created_at', { ascending: false }).limit(20)) || [];
@@ -1360,6 +1424,13 @@ export function createAi(ctx) {
     const eligible = usable.filter(entry => !cooling(entry.model, now));
     const coolingDown = usable.filter(entry => cooling(entry.model, now));
     if (!eligible.length) {
+      // The platform's own verified free models answer before anything else is
+      // offered: a student never needs a key of their own to be helped.
+      if (platform.length) {
+        const trial = trialConfig();
+        const fallback = trialCandidate(trial, needVision);
+        return fallback ? [...platform, ...fallback] : platform;
+      }
       // Nothing usable of the student’s own right now — offer the metered platform
       // trial, and only if that is unavailable either, spend one recovery probe.
       const trial = trialConfig();
@@ -1379,7 +1450,22 @@ export function createAi(ctx) {
         if (since < floor) return [{ ...soonest, probePaused: true, pausedForMs: floor - since }];
         return [soonest];
       }
-      if (!providers.length) fail('no_provider_configured', 409, 'Add an AI provider in Settings first.');
+      if (!providers.length) {
+        // The platform has free models on record but none of them can answer at
+        // this moment. The student is told the truth, and no credits are taken.
+        if (gateway) {
+          const state = await gateway.availability({ needVision }).catch(() => null);
+          if (state && state.registered > 0 && state.selectable_now === 0) {
+            // A spent shared allowance is a busy period, not an outage, and it
+            // clears on the provider's own schedule — not at our midnight reset.
+            if (state.quota_blocked > 0) {
+              fail('shared_quota_exhausted', 503, 'StudyBridge AI is temporarily busy. Please try again later.');
+            }
+            fail('free_models_unavailable', 503, 'StudyBridge AI is currently experiencing high demand. Your Bridge Credits have not been deducted. Please try again shortly.');
+          }
+        }
+        fail('no_provider_configured', 409, 'StudyBridge AI is not connected on this server yet. An administrator has to set the platform AI key; adding your own provider key in Settings also works.');
+      }
       if (needVision && trial.configured) fail('no_vision_model', 409, 'No enabled model here can read images, and the platform trial has no vision model attached. Enable a vision model in Settings or upload a PDF with a text layer.');
       fail('no_model_available', 409, 'Enable at least one model for a provider.');
     }
@@ -1396,7 +1482,10 @@ export function createAi(ctx) {
         return a.provider.is_default === b.provider.is_default ? 0 : (a.provider.is_default ? -1 : 1);
       });
     const ordered = ranked.length ? ranked : eligible.sort((a, b) => a.cost - b.cost);
-    return ordered.slice(0, MAX_CANDIDATES);
+    const own = ordered.slice(0, MAX_CANDIDATES);
+    // The student's own provider answers first; the platform's free models are
+    // the fallback that keeps the tutor working when it does not.
+    return platform.length ? [...own, ...platform.slice(0, MAX_PLATFORM_CANDIDATES)] : own;
   }
 
   const inFlight = new Map();
@@ -1408,8 +1497,37 @@ export function createAi(ctx) {
   // past the limit waits its turn instead of arriving at the provider as a burst.
   const ownerQueues = new Map();
 
-  function withSlot(ownerId, task) {
-    const limit = Math.max(1, setting('AI_MAX_CONCURRENT'));
+  // How many provider calls one student may have in flight at the same moment.
+  // The deployment Secret is the operator's ceiling and wins when it is set;
+  // otherwise the economy table is in force, so an administrator can change it
+  // from the dashboard without a redeploy.
+  async function concurrencyLimit() {
+    const raw = env('AI_MAX_CONCURRENT');
+    const explicit = raw === undefined || raw === null ? '' : String(raw).trim();
+    if (explicit !== '') {
+      const value = toInt(explicit, { min: 1, max: 4, fallback: 0 });
+      if (Number.isSafeInteger(value) && value > 0) return value;
+    }
+    if (!economy) return 1;
+    try {
+      const limits = await economy.limits();
+      const value = Number(limits.concurrent_requests_per_student);
+      return Number.isSafeInteger(value) && value > 0 ? value : 1;
+    } catch { return 1; }
+  }
+
+  // How long an answer may be. Also an economy control, for the same reason.
+  async function outputTokenLimit() {
+    if (!economy) return 1800;
+    try {
+      const limits = await economy.limits();
+      const value = Number(limits.max_output_tokens);
+      return Number.isSafeInteger(value) && value >= 128 && value <= 32000 ? value : 1800;
+    } catch { return 1800; }
+  }
+
+  async function withSlot(ownerId, task) {
+    const limit = await concurrencyLimit();
     const state = ownerQueues.get(ownerId) || { running: 0, queue: [] };
     ownerQueues.set(ownerId, state);
     const start = () => {
@@ -1459,10 +1577,10 @@ export function createAi(ctx) {
   async function rateGate(ownerId) {
     const profile = rows(await db.from('profiles').select('ai_limit_per_day').eq('owner_id', ownerId).limit(1));
     const dayLimit = toInt(profile?.[0]?.ai_limit_per_day, { min: 1, max: 5000, fallback: 120 });
-    const startOfDay = `${new Date().toISOString().slice(0, 10)}T00:00:00Z`;
+    const day = dayOf();
     const today = rows(await db.from('ai_usage').select('id,created_at')
       .eq('owner_id', ownerId).eq('ok', true).order('created_at', { ascending: false }).limit(dayLimit + 5)) || [];
-    const todays = today.filter(r => String(r.created_at) >= startOfDay);
+    const todays = today.filter(r => dayOfIso(r.created_at) === day);
     if (todays.length >= dayLimit) fail('daily_limit_reached', 429, `Daily AI limit of ${dayLimit} requests reached. Core study tools stay free.`);
     const minuteAgo = Date.now() - 60000;
     const perMinute = rows(await db.from('ai_usage').select('created_at')
@@ -1483,7 +1601,9 @@ export function createAi(ctx) {
       modelRowId = null, minTier = 1, needVision = false, style = 'simple', allowCache = false, message = '' } = options;
     await rateGate(ownerId);
     let pool = await candidates(ownerId, { needVision, minTier: modelRowId ? 1 : minTier, modelRowId });
-    const trial = pool[0].trial ? trialConfig() : null;
+    // The metered trial is gated whenever it is one of the candidates, not only
+    // when it is the first one: the platform's free models now stand in front of it.
+    const trial = pool.some(entry => entry.trial) ? trialConfig() : null;
     if (trial) await trialGate(ownerId, trial);
     const cacheKey = allowCache ? await sha256Hex(`${purpose}|${pool[0].model.id}|${system}|${prompt}`) : null;
     if (cacheKey) {
@@ -1527,10 +1647,14 @@ export function createAi(ctx) {
           // from the operator’s Secrets for this call only.
           apiKey = entry.provider.trial ? trial.api_key : await codec.decrypt(entry.provider.key_cipher);
           const adapter = ADAPTERS[entry.provider.wire] || ADAPTERS.openai;
+          // A platform provider writes its state to the platform registry; a
+          // student's own provider writes to their own row. One flag decides.
+          const platform = entry.provider.platform === true;
+          const tokenLimit = entry.provider.trial ? TRIAL_MAX_TOKENS : await outputTokenLimit();
           const build = () => {
             const built = adapter.build({
               base: entry.provider.base_url, model: entry.model.model_id, apiKey, prompt, system, images,
-              maxTokens: entry.provider.trial ? TRIAL_MAX_TOKENS : 1800,
+              maxTokens: tokenLimit,
             });
             return { url: built.url, init: built.init, apiKey };
           };
@@ -1555,14 +1679,14 @@ export function createAi(ctx) {
             failures.push(record);
             await logUsage(ownerId, { space_id: spaceId, provider_key: entry.provider.provider_key, model_id: entry.model.model_id, purpose, ok: false, failure: outcome.failure, latency_ms: Date.now() - started });
             if (TRANSIENT_CODES.has(outcome.failure) && !entry.provider.trial) {
-              record.cooledForMs = await markCooling(ownerId, entry.model.id, { code: outcome.failure, retryAfterMs: 0 });
-              await persistStatus(ownerId, entry.provider.id, outcome.failure, 'The endpoint did not answer in time.');
+              record.cooledForMs = await markCooling(ownerId, entry.model.id, { code: outcome.failure, retryAfterMs: 0, platform });
+              await persistStatus(ownerId, entry.provider.id, outcome.failure, 'The endpoint did not answer in time.', { platform });
             }
             continue;
           }
           if (outcome.failure === 'provider_redirect_blocked') {
             failures.push({ provider: entry.provider.api_name, model: entry.model.model_id, code: outcome.failure, detail: '' });
-            await persistStatus(ownerId, entry.provider.id, outcome.failure, 'The endpoint redirected, which is not followed.');
+            await persistStatus(ownerId, entry.provider.id, outcome.failure, 'The endpoint redirected, which is not followed.', { platform });
             continue;
           }
           const response = outcome.response;
@@ -1578,11 +1702,11 @@ export function createAi(ctx) {
             // student-fixable classes used to leave an old "bad key" message
             // sitting there while the provider was actually returning 503.
             if (!entry.provider.trial) {
-              await persistStatus(ownerId, entry.provider.id, code, describeFailure(outcome.status, outcome.detail) + providerSignature(outcome));
+              await persistStatus(ownerId, entry.provider.id, code, describeFailure(outcome.status, outcome.detail) + providerSignature(outcome), { platform });
             }
             if (code === 'provider_auth_failed') { keyRejected.push(entry.provider.id); continue; }
             if (TRANSIENT_CODES.has(code)) {
-              const ms = entry.provider.trial ? 0 : await markCooling(ownerId, entry.model.id, { code, retryAfterMs: outcome.retryAfterMs || 0 });
+              const ms = entry.provider.trial ? 0 : await markCooling(ownerId, entry.model.id, { code, retryAfterMs: outcome.retryAfterMs || 0, platform });
               failures[failures.length - 1].cooledForMs = ms;
             }
             // An exhausted allowance is not going to heal in thirty seconds. The
@@ -1590,7 +1714,7 @@ export function createAi(ctx) {
             // does not walk into the same 429 and spend another attempt on it.
             if (code === 'provider_quota_exhausted' && !entry.provider.trial) {
               const ms = await markCooling(ownerId, entry.model.id, {
-                code, retryAfterMs: Math.max(outcome.retryAfterMs || 0, setting('MODEL_COOLDOWN_MAX_MS')),
+                code, retryAfterMs: Math.max(outcome.retryAfterMs || 0, setting('MODEL_COOLDOWN_MAX_MS')), platform,
               });
               failures[failures.length - 1].cooledForMs = ms;
             }
@@ -1606,9 +1730,26 @@ export function createAi(ctx) {
           const json = parseJsonBlock(await readBody(response, 400000));
           const parsed = adapter.parse(json);
           if (!parsed?.text) {
-            failures.push({ provider: entry.provider.api_name, model: entry.model.model_id, code: 'empty_response' });
-            await logUsage(ownerId, { space_id: spaceId, provider_key: entry.provider.provider_key, model_id: entry.model.model_id, purpose, ok: false, failure: 'empty_response', latency_ms: Date.now() - started });
+            failures.push({ provider: entry.provider.api_name, model: entry.model.model_id, code: 'invalid_ai_response' });
+            await logUsage(ownerId, { space_id: spaceId, provider_key: entry.provider.provider_key, model_id: entry.model.model_id, purpose, ok: false, failure: 'invalid_ai_response', latency_ms: Date.now() - started });
             continue;
+          }
+          // A router answers with whichever model it picked. That answer is only
+          // accepted when the model that produced it is on the verified free
+          // list — an unverified model is thrown away, not priced on trust.
+          if (entry.model.router === true) {
+            const verdict = gateway
+              ? await gateway.verifyResponseModel(parsed.model, entry.model.provider_id)
+              : { ok: false, reason: 'The model registry is not available to check this answer.' };
+            if (!verdict.ok) {
+              failures.push({ provider: entry.provider.api_name, model: entry.model.model_id, code: 'unverified_model', detail: verdict.reason });
+              await logUsage(ownerId, { space_id: spaceId, provider_key: entry.provider.provider_key, model_id: entry.model.model_id, purpose, ok: false, failure: 'unverified_model', latency_ms: Date.now() - started });
+              await persistStatus(ownerId, entry.provider.id, 'unverified_model', verdict.reason, { platform });
+              continue;
+            }
+            // The model that really answered is named, not the router that picked it.
+            entry.model.model_id = verdict.model.model_id;
+            entry.model.model_name = verdict.model.display_name || verdict.model.model_id;
           }
           const inputTokens = parsed.inputTokens || Math.ceil((system.length + prompt.length + (images ? 1200 : 0)) / CHARS_PER_TOKEN);
           const outputTokens = parsed.outputTokens || Math.ceil(parsed.text.length / CHARS_PER_TOKEN);
@@ -1620,8 +1761,8 @@ export function createAi(ctx) {
           // It answered: the model is back in normal routing and the provider's
           // card stops showing a failure that no longer exists.
           if (!entry.provider.trial) {
-            await clearCooling(ownerId, entry.model.id);
-            await persistStatus(ownerId, entry.provider.id, 'ok', '');
+            await clearCooling(ownerId, entry.model.id, { platform });
+            await persistStatus(ownerId, entry.provider.id, 'ok', '', { platform });
           }
           if (cacheKey) {
             await db.from('ai_cache').insertIfAbsent({
@@ -1648,7 +1789,14 @@ export function createAi(ctx) {
       const worst = failures.find(item => item.detail) || failures[failures.length - 1] || {};
       const reason = worst.detail ? `${worst.model} → ${quote(worst.detail, 400)}`
         : worst.code ? `${worst.model} → ${worst.code.replace(/^provider_/, '').replace(/_/g, ' ')}` : '';
-      if (pool[0].trial) fail('trial_unavailable', 502, `The platform Free Trial did not answer${reason ? ` (${truncate(reason, 90)})` : ''}. Your own provider key in Settings is unaffected and is the reliable path.`);
+      // The platform's own free models were the only candidates and none of them
+      // answered. The message says exactly that, and says that nothing was taken
+      // from the student's balance.
+      const platformOnly = pool.length > 0 && pool.every(entry => entry.provider.platform === true);
+      if (platformOnly) {
+        fail('free_models_unavailable', 503, `StudyBridge AI is currently experiencing high demand. Your Bridge Credits have not been deducted. Please try again shortly${reason ? ` (${truncate(reason, 90)})` : ''}.`);
+      }
+      if (pool.some(entry => entry.trial)) fail('trial_unavailable', 502, `The platform Free Trial did not answer${reason ? ` (${truncate(reason, 90)})` : ''}. Your own provider key in Settings is unaffected and is the reliable path.`);
       // The pause is a decision we made, not a reply from the provider, so it says
       // plainly that nothing left this site and how long until the next real try.
       if (pool[0].probePaused) {
@@ -1661,7 +1809,7 @@ export function createAi(ctx) {
         const eta = Math.max(5, Math.round((pool[0].recoversInMs || setting('MODEL_COOLDOWN_MS')) / 1000));
         fail('models_temporarily_unavailable', 503, `All your enabled models are cooling down after temporary provider errors. ${truncate(worst.model || 'The model', 60)} is expected to be tried again in about ${eta} seconds, and StudyBridge tests it on that timer — you do not need to keep sending the question. Nothing was disabled and no answer was invented.`);
       }
-      if (keyRejected.length && failures.every(item => item.code === 'provider_auth_failed' || item.code === 'empty_response')) {
+      if (keyRejected.length && failures.every(item => item.code === 'provider_auth_failed' || item.code === 'invalid_ai_response')) {
         fail('provider_auth_failed', 502, `Your provider rejected the stored key${reason ? `: ${truncate(reason, 110)}` : ''}. Replace it in Settings → AI Providers — free study tools keep working meanwhile.`);
       }
       // When every failure was the same kind, that kind is the answer. A lone 429
@@ -1670,6 +1818,14 @@ export function createAi(ctx) {
       const kinds = new Set(failures.map(item => item.code));
       if (kinds.size === 1) {
         const only = failures[0].code;
+        // An answer that came back but could not be read is its own class: the
+        // provider did answer, so it is neither an outage nor a bad key, and
+        // nothing may be invented in its place.
+        if (only === 'invalid_ai_response') {
+          const first = failures[0];
+          fail('invalid_ai_response', 502,
+            `${modelLabel(first)} answered, but the reply could not be read as an answer${first.detail ? `: ${quote(first.detail, 110)}` : ''}. Your Bridge Credits have not been deducted and no answer was invented — please try again.`);
+        }
         if (TERMINAL_CODES.has(only)) {
           const first = failures[0];
           const account = limitSentence(first.account);
@@ -1702,6 +1858,7 @@ export function createAi(ctx) {
     for (const entry of pair) {
       const apiKey = await codec.decrypt(entry.provider.key_cipher);
       const adapter = ADAPTERS[entry.provider.wire] || ADAPTERS.openai;
+      const platform = entry.provider.platform === true;
       const build = () => ({
         ...adapter.build({ base: entry.provider.base_url, model: entry.model.model_id, apiKey, prompt: options.prompt, system: options.system }),
         apiKey,
@@ -1715,8 +1872,8 @@ export function createAi(ctx) {
         const reason = outcome.detail ? describeFailure(outcome.status, outcome.detail) : 'The endpoint did not answer.';
         await logUsage(ownerId, { space_id: options.spaceId, provider_key: entry.provider.provider_key, model_id: entry.model.model_id, purpose: 'compare', ok: false, failure: code });
         if (!entry.provider.trial) {
-          await persistStatus(ownerId, entry.provider.id, code, reason);
-          if (TRANSIENT_CODES.has(code)) await markCooling(ownerId, entry.model.id, { code, retryAfterMs: outcome.retryAfterMs || 0 });
+          await persistStatus(ownerId, entry.provider.id, code, reason, { platform });
+          if (TRANSIENT_CODES.has(code)) await markCooling(ownerId, entry.model.id, { code, retryAfterMs: outcome.retryAfterMs || 0, platform });
         }
         fail(['provider_auth_failed', 'provider_model_not_found', 'provider_access_denied', 'provider_rate_limited',
           'provider_unavailable', 'provider_unreachable', 'provider_timeout'].includes(code) ? code : 'all_providers_failed',
@@ -1726,14 +1883,14 @@ export function createAi(ctx) {
       if (!parsed?.text) {
         // An empty 200 is not an answer: merging it would invent one side of the
         // comparison, so the check stops here instead.
-        await logUsage(ownerId, { space_id: options.spaceId, provider_key: entry.provider.provider_key, model_id: entry.model.model_id, purpose: 'compare', ok: false, failure: 'empty_response' });
+        await logUsage(ownerId, { space_id: options.spaceId, provider_key: entry.provider.provider_key, model_id: entry.model.model_id, purpose: 'compare', ok: false, failure: 'invalid_ai_response' });
         fail('all_providers_failed', 502, `${entry.model.model_id} accepted the request but returned no text, so there was nothing to check. Ask again, or use a normal question.`);
       }
       answers.push({ label: `${entry.provider.api_name} · ${entry.model.model_name || entry.model.model_id}`, text: parsed.text });
       await logUsage(ownerId, { space_id: options.spaceId, provider_key: entry.provider.provider_key, model_id: entry.model.model_id, purpose: 'compare', input_tokens: parsed?.inputTokens || 0, output_tokens: parsed?.outputTokens || 0, cost_micro: estimateCost(entry.model, parsed?.inputTokens || 400, parsed?.outputTokens || 400), ok: true });
       if (!entry.provider.trial) {
-        await clearCooling(ownerId, entry.model.id);
-        await persistStatus(ownerId, entry.provider.id, 'ok', '');
+        await clearCooling(ownerId, entry.model.id, { platform });
+        await persistStatus(ownerId, entry.provider.id, 'ok', '', { platform });
       }
     }
     const merge = await complete(ownerId, {

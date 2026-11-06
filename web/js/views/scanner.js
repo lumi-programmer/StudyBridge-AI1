@@ -1,7 +1,7 @@
 // Smart Scanner — four stages. Verified book text and AI interpretation are kept
 // visibly apart, and every extract keeps its page reference.
 import { api, uploadFile } from '../api.js';
-import { clientKey } from '../store.js';
+import { clientKey, store } from '../store.js';
 import { citationList, emptyState, errorToast, field, h, modelTag, pageHead, richText, spinner, toast } from '../ui.js';
 import { ACTION_LIST, originBanner } from './shared.js';
 import { playQuiz } from './quiz.js';
@@ -228,6 +228,14 @@ PANEL = {
     }
     await loadChapters();
     const out = h('div', { class: 'stack' });
+    // The price of a tool is read from the server's economy table, so the badge
+    // on the button is the number the ledger charges.
+    const priceOf = action => {
+      const feature = store.boot?.economy?.actions?.[action];
+      if (!feature) return null;
+      const price = store.boot?.economy?.pricing?.[feature];
+      return Number.isFinite(price) ? price : null;
+    };
     const run = async (item, button) => {
       button.disabled = true;
       const label = button.textContent;
@@ -236,27 +244,40 @@ PANEL = {
       try {
         const res = await api.post('/api/ai/action', {
           action: item.action, book_id: bookId || undefined, chapter_id: chapterId || undefined,
-          space_id: spaceId || undefined, client_key: item.premium ? clientKey() : undefined,
+          space_id: spaceId || undefined, client_key: clientKey(),
         });
         out.firstChild?.remove?.();
         out.prepend(res.quiz_id ? quizResult(res) : textResult(item, res, spaceId));
-        if (item.premium && res.balance !== undefined) toast(`Premium pack used — balance ${res.balance} BC.`);
+        if (res.balance !== undefined) {
+          toast(res.credits_spent
+            ? `${item.label} used ${num(res.credits_spent)} BC — balance ${num(res.balance)} BC.`
+            : `No credits were deducted — balance ${num(res.balance)} BC.`);
+        }
       } catch (error) {
         out.firstChild?.remove?.();
         out.prepend(error.code === 'no_material'
           ? h('div', { class: 'banner warn' }, h('div', {}, h('b', { text: 'No scanned text yet' }), h('span', { text: error.hint || 'Finish Stage 3 for the chapter you want, then run this tool.' })))
-          : guidance(error));
+          : error.code === 'insufficient_credits'
+            ? h('div', { class: 'banner bad' }, h('div', {}, h('b', { text: 'Not enough Bridge Credits' }),
+              h('span', { text: error.hint || 'Earn more from the daily rewards.' }),
+              h('a', { class: 'btn sm', href: '#/rewards', text: 'Rewards Center' })))
+            : guidance(error));
       }
       button.disabled = false;
       button.textContent = label;
     };
     return h('div', { class: 'stack' },
       h('div', { class: 'card stack' }, h('h3', { text: 'Stage 4 — study tools over your own text' }),
-        h('p', { class: 'tiny muted', text: 'Definitions, summaries and short notes are free. Long notes and revision sheets cost 15 BC once each, and the debit is replay-safe. MCQs and practice open a real scored quiz.' }),
+        h('p', { class: 'tiny muted', text: 'Each tool shows its price before you run it. The credits are taken only if an answer comes back — if the request fails, they are refunded automatically. Scanning itself is free.' }),
         h('div', { class: 'field-row' }, field('Book', bookPicker), field('Chapter', chapterSelect), field('Save notes into space', spacePicker)),
-        h('div', { class: 'action-grid' }, ACTION_LIST.map(item => h('button', {
-          class: 'action', type: 'button', onClick: event => run(item, event.currentTarget),
-        }, h('b', { text: item.label }), item.premium ? h('small', { class: 'tag amber', text: `${item.premium} BC` }) : h('small', { class: 'tag green', text: 'free' }))))),
+        h('div', { class: 'action-grid' }, ACTION_LIST.map(item => {
+          const price = priceOf(item.action);
+          return h('button', {
+            class: 'action', type: 'button', onClick: event => run(item, event.currentTarget),
+          }, h('b', { text: item.label }), price === null
+            ? h('small', { class: 'tag green', text: 'free' })
+            : h('small', { class: `tag ${price ? 'amber' : 'green'}`, text: price ? `${price} BC` : 'free' }));
+        }))),
       out);
   },
 };

@@ -1,9 +1,10 @@
 // Identity, preferences, daily engagement, wallet, achievements and analytics.
 // Every number shown here is read back from recorded rows.
 import { ACHIEVEMENTS, GAME_CATALOG, QUESTION_BANK, WEEKLY_CHALLENGES } from '../content.mjs';
-import { addDays, dayOf, daysBetween, hashInt, monthKey, nowIso, uuid as asUuid, weekKey } from '../util.mjs';
+import { ACTION_FEATURES, REWARD_CATALOGUE } from '../economy.mjs';
+import { addDays, dayOf, dayOfIso, daysBetween, hashInt, monthKey, nextResetIso, nowIso, uuid as asUuid, weekKey } from '../util.mjs';
 
-export function createCore({ add, db, fail, rows, rewards, ai, ensureProfile, limit }) {
+export function createCore({ add, db, fail, rows, rewards, ai, ensureProfile, limit, economy, roles, gateway }) {
   const publicQuestion = item => ({ id: null, subject: item.s, question: item.q, options: item.o });
 
   add('GET', '/api/health', async () => Response.json({ ok: true, service: 'studybridge', time: nowIso() }), { auth: false });
@@ -27,10 +28,15 @@ export function createCore({ add, db, fail, rows, rewards, ai, ensureProfile, li
       .eq('owner_id', user.id).limit(40)) || [];
     const sessions = rows(await db.from('study_sessions').select('id,minutes,started_at,space_id')
       .eq('owner_id', user.id).order('started_at', { ascending: false }).limit(200)) || [];
-    const todayMinutes = sessions.filter(s => String(s.started_at).slice(0, 10) === day).reduce((a, s) => a + (s.minutes || 0), 0);
+    const todayMinutes = sessions.filter(s => dayOfIso(s.started_at) === day).reduce((a, s) => a + (s.minutes || 0), 0);
     const quizzesTaken = rows(await db.from('quiz_results').select('id').eq('owner_id', user.id).limit(300)) || [];
     // Compact so the shell can say what AI is actually reachable right now.
     const trial = await ai.trialStatus(user.id);
+    // The prices and the daily limits are read here so the browser can show a
+    // student what a request costs before they send it.
+    const pricing = await economy.pricing();
+    const limits = await economy.limits();
+    const role = await roles.roleOf(user.id);
     return Response.json({
       identity: { id: user.id, name: user.name || profile.display_name || 'Student', picture: user.picture || '' },
       profile,
@@ -47,9 +53,29 @@ export function createCore({ add, db, fail, rows, rewards, ai, ensureProfile, li
         remaining_today: trial.remaining_today,
         remaining_total: trial.remaining_total,
       },
+      // What the student pays for each kind of AI request, and how many priced
+      // requests are left today.
+      economy: {
+        pricing,
+        limits,
+        rewards: await economy.rewards(),
+        // Which priced feature each study tool belongs to, so the button in the
+        // browser shows the same price the ledger will charge.
+        actions: ACTION_FEATURES,
+        used_today: (await rewards.chargedToday(user.id)).length,
+      },
+      // The platform's own verified free models. A student does not need a key
+      // of their own to use them, and no key is ever included here.
+      free_models: gateway ? await gateway.status() : null,
+      // The daily allowance: questions used, questions left and the moment the
+      // counter returns to zero. All of it decided on the server.
+      daily_ai: await rewards.dailyUsage(user.id),
+      admin: { is_admin: role === 'admin', role },
       totals: { sessions: sessions.length, quizzes: quizzesTaken.length },
       games: GAME_CATALOG,
       server_day: day,
+      next_reset: nextResetIso(),
+      time_zone: 'Asia/Karachi',
     });
   });
 
@@ -102,7 +128,7 @@ export function createCore({ add, db, fail, rows, rewards, ai, ensureProfile, li
     const counters = await rewards.weekCounters(user.id, day);
     const sessions = rows(await db.from('study_sessions').select('id,minutes,started_at')
       .eq('owner_id', user.id).eq('completed', true).order('started_at', { ascending: false }).limit(60)) || [];
-    const qualifying = sessions.filter(s => String(s.started_at).slice(0, 10) === day);
+    const qualifying = sessions.filter(s => dayOfIso(s.started_at) === day);
     return Response.json({
       day,
       question: publicQuestion(question),
@@ -121,6 +147,11 @@ export function createCore({ add, db, fail, rows, rewards, ai, ensureProfile, li
       weekly: { ...challenge, progress: counters[challenge.metric] || 0, done: Boolean(rows(await db.from('transactions').select('id')
         .eq('owner_id', user.id).eq('reason', `weekly:${weekKey(day)}`).limit(1))?.[0]) },
       calendar: await rewards.calendar(user.id, days, day),
+      // The Pakistan day ends at midnight there, and that is the moment the
+      // daily login reward and the question allowance come back.
+      next_reset: nextResetIso(),
+      time_zone: 'Asia/Karachi',
+      daily_ai: await rewards.dailyUsage(user.id),
     });
   });
 
@@ -128,17 +159,33 @@ export function createCore({ add, db, fail, rows, rewards, ai, ensureProfile, li
     const day = dayOf();
     const daily = await rewards.touchDay(user.id, day);
     if (daily.login_claimed) return Response.json({ claimed: false, reason: 'already_claimed', balance: (await rewards.ensureWallet(user.id)).balance });
-    const result = await rewards.applyDelta(user.id, { reason: `login:${day}`, label: 'Daily login', amount: 30, meta: { day } });
+    const amount = await rewards.rewardFor('daily_login', 30);
+    // The claim row is the record of the claim. Its unique constraint is what
+    // makes a second claim of the same day a no-op, even from two tabs.
+    const claim = await rewards.claimReward(user.id, 'daily_login', day, amount);
+    if (!claim.claimed) return Response.json({ claimed: false, reason: 'already_claimed', balance: (await rewards.ensureWallet(user.id)).balance });
+    let result = null;
+    if (amount > 0) {
+      result = await rewards.applyDelta(user.id, { reason: `login:${day}`, label: 'Daily login', amount, meta: { day, type: 'daily_reward' } });
+    }
     await db.from('daily_states').update({ login_claimed: true, updated_at: nowIso() })
       .eq('id', daily.id).eq('owner_id', user.id).eq('day', day).select('id');
     const refreshed = await rewards.touchDay(user.id, day);
     const challenge = await rewards.maybeDailyChallenge(user.id, refreshed);
+    const balance = (await rewards.ensureWallet(user.id)).balance;
+    if (amount <= 0) {
+      return Response.json({
+        claimed: false, reason: 'reward_disabled', credits: 0, daily: challenge, balance,
+        note: 'The daily login reward is switched off at the moment, so nothing was paid today.',
+      });
+    }
     return Response.json({
       claimed: true,
-      tx: result.tx,
-      cap_note: result.cap_note || null,
+      credits: amount,
+      tx: result?.tx || null,
+      cap_note: result?.cap_note || null,
       daily: challenge,
-      balance: result.wallet?.balance ?? (await rewards.ensureWallet(user.id)).balance,
+      balance,
     });
   });
 
@@ -152,9 +199,14 @@ export function createCore({ add, db, fail, rows, rewards, ai, ensureProfile, li
     if (!Number.isInteger(choice) || choice < 0 || choice >= question.o.length) fail('invalid_input', 400);
     const correct = choice === question.a;
     let tx = null;
+    let credits = 0;
     if (correct) {
-      const awarded = await rewards.applyDelta(user.id, { reason: `dq:${day}`, label: 'Daily question correct', amount: 10, meta: { day } });
-      tx = awarded.tx;
+      credits = await rewards.rewardFor('daily_question', 10);
+      const claim = await rewards.claimReward(user.id, 'daily_question', day, credits);
+      if (claim.claimed && credits > 0) {
+        const awarded = await rewards.applyDelta(user.id, { reason: `dq:${day}`, label: 'Daily learning question', amount: credits, meta: { day, type: 'learning_reward' } });
+        tx = awarded.tx;
+      }
     }
     await db.from('daily_states').update({ answered: true, correct, updated_at: nowIso() })
       .eq('id', daily.id).eq('owner_id', user.id).eq('day', day).select('id');
@@ -166,6 +218,7 @@ export function createCore({ add, db, fail, rows, rewards, ai, ensureProfile, li
       explanation: question.e,
       answer_index: question.a,
       tx,
+      credits,
       daily: challenge,
       balance: (await rewards.ensureWallet(user.id)).balance,
     });
@@ -181,6 +234,67 @@ export function createCore({ add, db, fail, rows, rewards, ai, ensureProfile, li
     });
   });
 
+  // The Rewards Center: what each reward pays, whether an administrator has
+  // switched it on, and whether this student has already claimed it in the
+  // current period. Nothing here is claimable twice: the claim rows are the
+  // same rows the ledger used.
+  add('GET', '/api/rewards', async ({ user }) => {
+    const day = dayOf();
+    const week = weekKey(day);
+    const claims = await rewards.claimPeriods(user.id);
+    const claimedFor = (code, prefix) => claims.some(claim => claim.code === code && String(claim.period).startsWith(prefix));
+    const rewardTable = await economy.rewards();
+    const flags = await economy.rewardFlags();
+    const streak = rows(await db.from('streaks').select('current,longest,last_day').eq('owner_id', user.id).limit(1))?.[0]
+      || { current: 0, longest: 0, last_day: '' };
+    const state = rows(await db.from('daily_states')
+      .select('day,answered,correct,sessions,goal_minutes,goal_done,challenge_done,login_claimed')
+      .eq('owner_id', user.id).eq('day', day).limit(1))?.[0] || {};
+    const profile = await ensureProfile(user);
+    const goalTarget = Number(profile.daily_goal_minutes) > 0 ? Number(profile.daily_goal_minutes) : 30;
+    const counters = await rewards.weekCounters(user.id, day);
+    const weekly = WEEKLY_CHALLENGES[hashInt(`weekly:${week}`) % WEEKLY_CHALLENGES.length];
+    const achievements = new Set((rows(await db.from('achievements').select('code').eq('owner_id', user.id).limit(120)) || []).map(a => a.code));
+    const wallet = await rewards.ensureWallet(user.id);
+
+    const catalogue = REWARD_CATALOGUE.map(reward => {
+      const enabled = flags[reward.code] !== false;
+      const amount = enabled && Number.isSafeInteger(rewardTable[reward.code]) ? rewardTable[reward.code] : (enabled ? reward.amount : 0);
+      let claimed = false;
+      let progress = '';
+      if (reward.code === 'daily_login') { claimed = claimedFor('daily_login', day); progress = claimed ? 'Claimed today' : 'Ready to claim'; }
+      else if (reward.code === 'daily_question') { claimed = claimedFor('daily_question', day); progress = state.correct ? 'Answered correctly today' : (state.answered ? 'Answered today — not correct' : 'Not answered yet'); }
+      else if (reward.code === 'study_session') { claimed = claimedFor('study_session', day); progress = `${Number(state.sessions || 0)} of 2 credited sessions`; }
+      else if (reward.code === 'daily_goal') { claimed = claimedFor('daily_goal', day); progress = `${Number(state.goal_minutes || 0)} of ${goalTarget} minutes`; }
+      else if (reward.code === 'daily_challenge') { claimed = claimedFor('daily_challenge', day); progress = state.challenge_done ? 'Done today' : (state.answered && Number(state.sessions || 0) > 0 ? 'Answered — finish a session to complete it' : 'Answer the question and finish a session'); }
+      else if (reward.code === 'weekly_goal') { claimed = claimedFor('weekly_goal', week); progress = `${Number(counters[weekly.metric] || 0)} of ${weekly.target} ${weekly.metric}`; }
+      else if (reward.code === 'streak_7') { claimed = achievements.has('streak_7'); progress = `${streak.current} day streak — needs 7`; }
+      return {
+        code: reward.code, label: reward.label, period: reward.period, how: reward.how,
+        amount, enabled, claimed, progress,
+      };
+    });
+
+    return Response.json({
+      day,
+      week,
+      catalogue,
+      balance: wallet.balance,
+      earned_today: (await rewards.calendar(user.id, 1, day))[0]?.earned || 0,
+      spent_today: 0,
+      weekly_challenge: { title: weekly.title, metric: weekly.metric, target: weekly.target, current: Number(counters[weekly.metric] || 0) },
+      streak: { current: streak.current, longest: streak.longest },
+      daily_regular_cap: rewardTable.daily_regular_cap ?? 90,
+      // The daily login reward and the daily question allowance both belong to
+      // the Pakistan calendar day, and both become claimable again at midnight
+      // there — not after a rolling 24 hours.
+      next_reset: nextResetIso(),
+      time_zone: 'Asia/Karachi',
+      daily_ai: await rewards.dailyUsage(user.id),
+      note: 'Rewards are granted by the server from recorded activity. A reward can only be earned once per period, and the ledger keeps the proof.',
+    });
+  });
+
   add('GET', '/api/wallet', async ({ user, query }) => {
     const wallet = await rewards.ensureWallet(user.id);
     const day = dayOf();
@@ -188,6 +302,22 @@ export function createCore({ add, db, fail, rows, rewards, ai, ensureProfile, li
     const streak = rows(await db.from('streaks').select('current,longest').eq('owner_id', user.id).limit(1))?.[0] || { current: 0, longest: 0 };
     const achievements = rows(await db.from('achievements').select('code,title,reward,created_at')
       .eq('owner_id', user.id).order('created_at', { ascending: false }).limit(30)) || [];
+    // The prices, the reward amounts and the limits all come from the economy,
+    // so the numbers on this page are the numbers the ledger charges.
+    const pricing = await economy.pricing();
+    const rewardTable = await economy.rewards();
+    const rewardFlags = await economy.rewardFlags();
+    const limits = await economy.limits();
+    const claims = await rewards.claimPeriods(user.id);
+    const todaysClaims = claims.filter(claim => dayOfIso(claim.created_at) === day);
+    const ledgerRows = rows(await db.from('transactions')
+      .select('amount,direction,created_at').eq('owner_id', user.id).order('created_at', { ascending: false }).limit(200)) || [];
+    const todayEarned = ledgerRows
+      .filter(row => dayOfIso(row.created_at) === day && row.direction === 'earn')
+      .reduce((sum, row) => sum + (Number(row.amount) || 0), 0);
+    const todaySpent = ledgerRows
+      .filter(row => dayOfIso(row.created_at) === day && row.direction === 'spend')
+      .reduce((sum, row) => sum + (Number(row.amount) || 0), 0);
     return Response.json({
       balance: wallet.balance,
       earned: wallet.earned,
@@ -198,10 +328,33 @@ export function createCore({ add, db, fail, rows, rewards, ai, ensureProfile, li
       hasMore: history.hasMore,
       achievements,
       rates: {
-        earn: { login: 30, daily_question: 10, study_session: 15, daily_goal: 20, daily_challenge: 15 },
-        daily_regular_cap: 90,
-        spend: { advanced_comparison: 10, premium_note_pack: 15, deep_check_quiz: 12 },
+        earn: {
+          login: rewardFlags.daily_login === false ? 0 : rewardTable.daily_login,
+          daily_question: rewardFlags.daily_question === false ? 0 : rewardTable.daily_question,
+          study_session: rewardFlags.study_session === false ? 0 : rewardTable.study_session,
+          daily_goal: rewardFlags.daily_goal === false ? 0 : rewardTable.daily_goal,
+          daily_challenge: rewardFlags.daily_challenge === false ? 0 : rewardTable.daily_challenge,
+          streak_7: rewardFlags.streak_7 === false ? 0 : rewardTable.streak_7,
+          weekly_goal: rewardFlags.weekly_goal === false ? 0 : rewardTable.weekly_goal,
+        },
+        // What each AI request costs, by feature.
+        spend: pricing,
+        features: economy.catalogue,
+        daily_regular_cap: rewardTable.daily_regular_cap,
+        reward_flags: rewardFlags,
         note: 'Bridge Credits are in-app reward points, not money or API billing credits.',
+      },
+      limits: {
+        ...limits,
+        priced_requests_today: (await rewards.chargedToday(user.id)).length,
+      },
+      // What the student may still ask today, and when the allowance returns.
+      daily_ai: await rewards.dailyUsage(user.id),
+      today: {
+        day,
+        earned: todayEarned,
+        spent: todaySpent,
+        claimed: todaysClaims.map(claim => ({ code: claim.code, period: claim.period, amount: claim.amount })),
       },
       basic_tools_free: true,
     });
@@ -209,14 +362,15 @@ export function createCore({ add, db, fail, rows, rewards, ai, ensureProfile, li
 
   add('POST', '/api/wallet/spend', async ({ user, body }) => {
     const input = await body();
-    const priceList = { advanced_comparison: 10, premium_note_pack: 15, deep_check_quiz: 12 };
+    // The price comes from the economy table, never from the request body.
     const feature = String(input.feature || '');
-    if (!priceList[feature]) fail('invalid_input', 400);
+    const price = await economy.price(feature);
+    if (price === null) fail('invalid_input', 400, 'This feature has no configured price.');
     const key = asUuid(input.client_key);
     if (!key) fail('invalid_input', 400);
     const result = await rewards.applyDelta(user.id, {
       reason: `spend:${key}`, label: `Premium feature: ${feature.replace(/_/g, ' ')}`,
-      amount: priceList[feature], direction: 'spend', meta: { feature, key },
+      amount: price, direction: 'spend', meta: { feature, key, type: 'ai_usage' },
     });
     return Response.json({ tx: result.tx, balance: result.wallet?.balance ?? (await rewards.ensureWallet(user.id)).balance, replayed: result.replayed });
   });
@@ -256,7 +410,7 @@ export function createCore({ add, db, fail, rows, rewards, ai, ensureProfile, li
       .eq('owner_id', user.id).order('created_at', { ascending: false }).limit(300)) || [];
 
     const spaceName = new Map(spaces.map(s => [s.id, s.name]));
-    const dateOf = value => String(value).slice(0, 10);
+    const dateOf = value => dayOfIso(value) || '';
     const completed = sessions.filter(s => s.completed !== false);
     const byDay = new Map();
     for (const session of sessions) {

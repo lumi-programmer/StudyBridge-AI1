@@ -1,8 +1,8 @@
 // Quiz player. Questions arrive without answer keys; grading, explanations and
 // any reward come back from the server after submit.
 import { api } from '../api.js';
-import { clientKey, refresh } from '../store.js';
-import { errorToast, h, openSheet, sheetTitle, toast } from '../ui.js';
+import { clientKey, refresh, store } from '../store.js';
+import { errorToast, h, num, openSheet, sheetTitle, toast } from '../ui.js';
 import { originBanner } from './shared.js';
 
 export async function openQuiz(quizId, { onDone } = {}) {
@@ -90,14 +90,24 @@ function sourceTag(source) {
 
 export function quizCreator({ spaceId, bookId, chapterId, subject, onCreated }) {
   const count = h('select', {}, [5, 8, 10, 12, 15].map(n => h('option', { value: n, selected: n === 8 }, `${n} questions`)));
+  const aiPrice = store.boot?.economy?.pricing?.practice_quiz;
   const run = mode => async event => {
     const btn = event.currentTarget;
     btn.disabled = true;
     const label = btn.textContent;
     btn.textContent = 'Building…';
     try {
-      const res = await api.post('/api/quizzes', { mode, count: Number(count.value), space_id: spaceId, book_id: bookId, chapter_id: chapterId, subject });
+      // A key on every request means a double click cannot be charged twice.
+      const res = await api.post('/api/quizzes', {
+        mode, count: Number(count.value), space_id: spaceId, book_id: bookId, chapter_id: chapterId, subject,
+        client_key: clientKey(),
+      });
       playQuiz(res, { onDone: onCreated });
+      if (mode === 'ai' && res.credits_spent !== undefined) {
+        toast(res.credits_spent
+          ? `AI quiz built · ${num(res.credits_spent)} BC used · balance ${num(res.balance)} BC.`
+          : 'Built from your own scanned text — no credits were deducted.');
+      }
       onCreated?.();
     } catch (error) {
       errorToast(error);
@@ -111,5 +121,6 @@ export function quizCreator({ spaceId, bookId, chapterId, subject, onCreated }) 
     h('div', { class: 'quiz-modes' },
       h('button', { class: 'mode-card', type: 'button', onClick: run('local') }, h('b', { text: 'From my scans' }), h('small', { text: 'Free · fill-in and definition questions built from your own pages' })),
       h('button', { class: 'mode-card', type: 'button', onClick: run('bank') }, h('b', { text: 'Practice bank' }), h('small', { text: 'Free · checked questions, no scan needed' })),
-      h('button', { class: 'mode-card', type: 'button', onClick: run('ai') }, h('b', { text: 'AI questions' }), h('small', { text: 'Uses your provider · falls back to free scan questions if none' }))));
+      h('button', { class: 'mode-card', type: 'button', onClick: run('ai') }, h('b', { text: 'AI questions' }),
+        h('small', { text: Number.isFinite(aiPrice) ? `${aiPrice} BC · written from your scans · refunded if it fails` : 'Written from your scans · falls back to free scan questions if none' }))));
 }

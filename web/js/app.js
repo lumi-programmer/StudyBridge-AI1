@@ -15,11 +15,14 @@ const ROUTES = {
   streak: () => import('./views/streak.js'),
   progress: () => import('./views/progress.js'),
   wallet: () => import('./views/wallet.js'),
+  rewards: () => import('./views/rewards.js'),
+  admin: () => import('./views/admin.js'),
   settings: () => import('./views/settings.js'),
 };
 const TITLES = {
   dashboard: 'Dashboard', spaces: 'My Spaces', library: 'My Library', scanner: 'Smart Scanner', tutor: 'AI Tutor',
-  focus: 'Focus Mode', games: 'Game Center', streak: 'Daily Streaks', progress: 'My Progress', wallet: 'Bridge Wallet', settings: 'Settings', notfound: 'Page not found',
+  focus: 'Focus Mode', games: 'Game Center', streak: 'Daily Streaks', progress: 'My Progress', wallet: 'Bridge Wallet',
+  rewards: 'Rewards Center', admin: 'Admin', settings: 'Settings', notfound: 'Page not found',
 };
 
 const view = document.getElementById('view');
@@ -104,11 +107,16 @@ function paintChips() {
   adoptProfile(boot.profile?.theme);
   document.querySelector('#chipCredits b').textContent = num(boot.wallet?.balance ?? 0);
   document.querySelector('#chipStreak b').textContent = num(boot.streak?.current ?? 0);
+  const adminLink = document.getElementById('navAdmin');
+  if (adminLink) adminLink.hidden = boot.admin?.is_admin !== true;
   const nav = document.getElementById('navProvider');
   const def = boot.providers?.default;
   const trial = boot.trial;
+  const free = boot.free_models;
   if (boot.providers?.count) {
     nav.textContent = `AI: ${def?.api_name || `${boot.providers.count} provider${boot.providers.count > 1 ? 's' : ''}`} · ${boot.providers.models} model${boot.providers.models === 1 ? '' : 's'}`;
+  } else if (free?.approved_free_models) {
+    nav.textContent = `AI: ${free.approved_free_models} verified free model${free.approved_free_models === 1 ? '' : 's'} on the platform. No key of your own needed.`;
   } else if (trial?.configured) {
     nav.textContent = `Free Trial: ${trial.remaining_today} of ${trial.daily_limit} AI requests left today. Add your own key for unlimited.`;
   } else {

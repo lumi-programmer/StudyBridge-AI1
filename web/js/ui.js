@@ -180,6 +180,19 @@ export function clock(seconds) {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
+// How long until the next daily reset. The instant itself comes from the
+// server, so the device clock only ever decides how long to say it is.
+export function untilLabel(iso) {
+  const stamp = Date.parse(iso);
+  if (Number.isNaN(stamp)) return '';
+  const mins = Math.round((stamp - Date.now()) / 60000);
+  if (mins <= 0) return 'now';
+  if (mins < 60) return `in ${mins} min`;
+  const hours = Math.floor(mins / 60);
+  const rest = mins % 60;
+  return rest ? `in ${hours} h ${rest} min` : `in ${hours} h`;
+}
+
 // Rates are entered by the student in their provider's billing unit, so no
 // currency is claimed here.
 export function microToText(micro) {

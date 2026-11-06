@@ -1,13 +1,13 @@
 // Learning spaces, their private context, notes, saved questions and the AI
 // tutor conversation that belongs to one space only.
 import { nowIso, text as asText, truncate, uuid as asUuid } from '../util.mjs';
+import { ACTION_FEATURES } from '../economy.mjs';
 import { buildLocalQuiz, importantTerms, publicQuestions, sanitizeQuestions } from '../quiz.mjs';
 
 const ACTIONS = new Set([
   'explain_simple', 'explain_detailed', 'definitions', 'summary', 'short_notes', 'long_notes',
   'mcqs', 'practice', 'numericals', 'examples', 'concepts', 'revision', 'urdu_explain',
 ]);
-const PAID_ACTIONS = { long_notes: 'premium_note_pack', revision: 'premium_note_pack' };
 
 const ACTION_PROMPT = {
   explain_simple: 'Explain this material simply and briefly.',
@@ -38,8 +38,42 @@ function extractiveSummary(pages) {
   return lines;
 }
 
-export function createSpaces({ add, db, fail, rows, ai, rewards, limit, ensureProfile }) {
+export function createSpaces({ add, db, fail, rows, ai, rewards, limit, ensureProfile, economy }) {
   const spaceColumns = 'id,name,subject,color,instructions,archived,created_at,updated_at';
+
+  // What one AI feature costs right now. A feature with no configured price is
+  // refused rather than treated as free.
+  async function priceOf(feature) {
+    const price = await economy.price(feature);
+    if (price === null) fail('invalid_input', 400, 'This request has no configured price.');
+    return price;
+  }
+
+  // The answer a previous, already-charged request with this key produced.
+  // A repeated submit shows that answer again instead of charging twice.
+  async function previousAnswer(user, spaceId, key) {
+    const found = rows(await db.from('messages')
+      .select('id,role,content,provider,model,sources,created_at')
+      .eq('owner_id', user.id).eq('space_id', spaceId)
+      .order('created_at', { ascending: false }).limit(80)) || [];
+    const hit = found.find(row => row.role === 'assistant' && row.sources?.request_key === key);
+    if (!hit) return null;
+    const sources = hit.sources || {};
+    return {
+      id: hit.id,
+      reply: hit.content,
+      provider: { provider_key: hit.provider || '' },
+      model: { model_id: hit.model || '' },
+      citations: sources.citations || [],
+      cached: Boolean(sources.cached),
+      attempts: sources.attempts || 1,
+      retried: Boolean(sources.retried),
+      fell_back: Boolean(sources.fell_back),
+      fell_back_from: sources.fell_back_from || [],
+      tokens: 0,
+      cost_micro: 0,
+    };
+  }
 
   async function counts(user, ids) {
     if (!ids.length) return new Map();
@@ -273,6 +307,32 @@ export function createSpaces({ add, db, fail, rows, ai, rewards, limit, ensurePr
     const contextBlock = ai.buildContextBlock({ history: context.history, pages, books: context.books });
     const prompt = `${contextBlock ? `${contextBlock}\n\n` : ''}Student question: ${message}`;
     const advanced = input.advanced === true;
+    const feature = advanced ? 'advanced_comparison' : 'basic_question';
+    const price = await priceOf(feature);
+
+    // The credits are reserved before any model is contacted. A request that
+    // cannot be paid for never reaches a provider, and a request that fails
+    // afterwards gets its credits back.
+    const reservation = await rewards.reserveAi(user.id, {
+      feature,
+      requestKey: asUuid(input.client_key) || '',
+      credits: price,
+      label: advanced ? 'Advanced two-model check' : 'AI Tutor question',
+    });
+    if (reservation.replayed) {
+      if (reservation.state === 'settled') {
+        const previous = await previousAnswer(user, spaceId, reservation.key);
+        if (previous) {
+          return Response.json({
+            ...previous,
+            advanced,
+            replayed: true,
+            note: 'This exact request was already answered and paid for. The same answer is shown again — no credits were taken a second time.',
+          });
+        }
+      }
+      fail('idempotency_conflict', 409, 'This request is already running. Wait for the answer instead of sending it again.');
+    }
 
     rows(await db.from('messages').insert({
       id: crypto.randomUUID(), owner_id: user.id, space_id: spaceId, role: 'user', content: message,
@@ -280,29 +340,44 @@ export function createSpaces({ add, db, fail, rows, ai, rewards, limit, ensurePr
     }));
 
     if (advanced) {
-      const spendKey = asUuid(input.client_key) || fail('invalid_input', 400, 'Send a client_key with the advanced check.');
-      const spend = await rewards.applyDelta(user.id, {
-        reason: `spend:compare:${spendKey}`, label: 'Advanced two-model check', amount: 10, direction: 'spend', meta: { space_id: spaceId },
-      });
-      const compared = await ai.compare(user.id, { prompt, system, spaceId, purpose: 'compare' });
+      let compared;
+      try {
+        compared = await ai.compare(user.id, { prompt, system, spaceId, purpose: 'compare' });
+      } catch (error) {
+        await rewards.refundAi(user.id, reservation.key, { reason: error?.code || 'compare_failed', feature });
+        throw error;
+      }
       const answerId = crypto.randomUUID();
       rows(await db.from('messages').insert({
         id: answerId, owner_id: user.id, space_id: spaceId, role: 'assistant', content: compared.final,
         provider: compared.provider?.provider_key || '', model: compared.model?.model_id || '', style,
-        tokens: 0, cost_micro: 0, sources: { citations: citationsFor(pages), checked: compared.answers },
+        tokens: 0, cost_micro: 0,
+        sources: { citations: citationsFor(pages), checked: compared.answers, request_key: reservation.key },
         created_at: nowIso(),
       }));
+      await rewards.settleAi(user.id, reservation.key, {
+        providerKey: compared.provider?.provider_key || '', modelId: compared.model?.model_id || '',
+      });
       await scoped.log({ spaceId, kind: 'chat', topic: topicOf(message, space), detail: 'advanced comparison' });
+      const wallet = await rewards.ensureWallet(user.id);
       return Response.json({
-        reply: compared.final, checked: compared.answers, balance: spend.wallet?.balance,
-        model: compared.model, provider: compared.provider, citations: citationsFor(pages), advanced: true,
+        reply: compared.final, checked: compared.answers, balance: wallet.balance,
+        credits_spent: price, model: compared.model, provider: compared.provider,
+        citations: citationsFor(pages), advanced: true,
       });
     }
 
-    const result = await ai.complete(user.id, {
-      prompt, system, spaceId, style, message, modelRowId, purpose: 'chat',
-      minTier: ai.classify(message, style),
-    });
+    let result;
+    try {
+      result = await ai.complete(user.id, {
+        prompt, system, spaceId, style, message, modelRowId, purpose: 'chat',
+        minTier: ai.classify(message, style),
+      });
+    } catch (error) {
+      // Nothing was delivered, so the reserved credits go back.
+      await rewards.refundAi(user.id, reservation.key, { reason: error?.code || 'chat_failed', feature });
+      throw error;
+    }
     const answerId = crypto.randomUUID();
     rows(await db.from('messages').insert({
       id: answerId, owner_id: user.id, space_id: spaceId, role: 'assistant', content: String(result.text).slice(0, 20000),
@@ -312,10 +387,15 @@ export function createSpaces({ add, db, fail, rows, ai, rewards, limit, ensurePr
         citations: citationsFor(pages), cached: Boolean(result.cached), attempts: result.attempts || 1,
         retried: Boolean(result.retried), fell_back: Boolean(result.fellBack),
         fell_back_from: (result.failures || []).map(f => `${f.model} (${f.code})`).slice(0, 3),
+        request_key: reservation.key,
       },
       created_at: nowIso(),
     }));
+    await rewards.settleAi(user.id, reservation.key, {
+      providerKey: result.provider?.provider_key || '', modelId: result.model?.model_id || '',
+    });
     await scoped.log({ spaceId, kind: 'chat', topic: topicOf(message, space), detail: truncate(result.text, 200) });
+    const wallet = await rewards.ensureWallet(user.id);
     return Response.json({
       id: answerId,
       reply: result.text,
@@ -323,6 +403,8 @@ export function createSpaces({ add, db, fail, rows, ai, rewards, limit, ensurePr
       model: result.model,
       tokens: (result.inputTokens || 0) + (result.outputTokens || 0),
       cost_micro: result.costMicro || 0,
+      credits_spent: price,
+      balance: wallet.balance,
       cached: Boolean(result.cached),
       attempts: result.attempts || 1,
       // Which model actually answered is stated, never implied: a fallback is
@@ -356,17 +438,23 @@ export function createSpaces({ add, db, fail, rows, ai, rewards, limit, ensurePr
     });
     if (!pages.length) fail('no_material', 409, 'Scan a chapter page or connect a book to this space first.');
 
-    const paid = PAID_ACTIONS[action];
-    let spend = null;
-    if (paid) {
-      // A client key makes the debit replay-safe: a double click cannot spend
-      // the same premium action twice.
-      const spendKey = asUuid(input.client_key) || fail('invalid_input', 400, 'Send a client_key with a premium action.');
-      spend = await rewards.applyDelta(user.id, {
-        reason: `spend:${paid}:${spendKey}`, label: `Premium ${action.replace(/_/g, ' ')}`,
-        amount: 15, direction: 'spend', meta: { action },
-      });
+    // Every study tool is an AI request, so every study tool has a price. The
+    // price comes from the economy, which an administrator controls.
+    const feature = ACTION_FEATURES[action];
+    if (!feature) fail('invalid_input', 400, 'This tool has no price configured.');
+    const price = await priceOf(feature);
+    // A client key makes the debit replay-safe: a double click cannot spend
+    // the same request twice. A client that sends none still gets an answer;
+    // the server makes the key, so the request is charged exactly once.
+    const spendKey = asUuid(input.client_key) || crypto.randomUUID();
+    const reservation = await rewards.reserveAi(user.id, {
+      feature, requestKey: spendKey, credits: price,
+      label: `Study tool: ${action.replace(/_/g, ' ')}`,
+    });
+    if (reservation.replayed) {
+      fail('idempotency_conflict', 409, 'This request is already running. Wait for the result instead of sending it again.');
     }
+    const wallet = async () => (await rewards.ensureWallet(user.id)).balance;
 
     if (action === 'mcqs' || action === 'practice') {
       const wanted = action === 'mcqs' ? 8 : 6;
@@ -386,17 +474,32 @@ export function createSpaces({ add, db, fail, rows, ai, rewards, limit, ensurePr
           provider: generated.result.provider?.provider_key || '', model: generated.result.model?.model_id || '',
           created_at: nowIso(),
         }));
-        return Response.json({ quiz_id: quizId, title: titleFor(action, space, pages), questions: publicQuestions(cleaned), origin: 'ai', provider: generated.result.provider, model: generated.result.model, balance: spend?.wallet?.balance });
+        await rewards.settleAi(user.id, reservation.key, {
+          providerKey: generated.result.provider?.provider_key || '', modelId: generated.result.model?.model_id || '',
+        });
+        return Response.json({
+          quiz_id: quizId, title: titleFor(action, space, pages), questions: publicQuestions(cleaned),
+          origin: 'ai', provider: generated.result.provider, model: generated.result.model,
+          credits_spent: price, balance: await wallet(),
+        });
       } catch (error) {
         if (['credentials_not_configured', 'rate_limited', 'daily_limit_reached', 'no_provider_configured'].includes(error?.code)) {
+          // The quiz below is built from the student's own text, not by a model,
+          // so the AI credits are given back.
+          await rewards.refundAi(user.id, reservation.key, { reason: error?.code || 'ai_unavailable', feature });
           const local = buildLocalQuiz(pages, { count: wanted, title: titleFor(action, space, pages) });
           const quizId = crypto.randomUUID();
           rows(await db.from('quizzes').insert({
             id: quizId, owner_id: user.id, space_id: spaceId, book_id: bookId, chapter_id: chapterId,
             title: local.title, questions: local.questions, origin: local.origin, provider: '', model: '', created_at: nowIso(),
           }));
-          return Response.json({ quiz_id: quizId, title: local.title, questions: publicQuestions(local.questions), origin: local.origin, note: local.note, balance: spend?.wallet?.balance });
+          return Response.json({
+            quiz_id: quizId, title: local.title, questions: publicQuestions(local.questions), origin: local.origin,
+            note: `${local.note} No credits were deducted: this quiz was built from your own scanned text, not by a model.`,
+            credits_spent: 0, balance: await wallet(),
+          });
         }
+        await rewards.refundAi(user.id, reservation.key, { reason: error?.code || 'quiz_failed', feature });
         throw error;
       }
     }
@@ -411,18 +514,28 @@ export function createSpaces({ add, db, fail, rows, ai, rewards, limit, ensurePr
       });
     } catch (error) {
       if (error?.code === 'no_provider_configured' || error?.code === 'credentials_not_configured' || error?.code === 'daily_limit_reached') {
+        // A plain extract of the student's own pages is not an AI explanation,
+        // so the credits for the AI explanation are returned.
+        await rewards.refundAi(user.id, reservation.key, { reason: error?.code || 'ai_unavailable', feature });
         if (action === 'definitions') {
           const terms = importantTerms(pages);
-          return Response.json({ text: terms.map(t => `${t.term} — ${t.definition} (page ${t.page})`).join('\n'), origin: 'local_text', citations: citationsFor(pages) });
+          return Response.json({
+            text: terms.map(t => `${t.term} — ${t.definition} (page ${t.page})`).join('\n'),
+            origin: 'local_text', citations: citationsFor(pages), credits_spent: 0, balance: await wallet(),
+            note: 'No credits were deducted: this is a plain extract of your own scanned sentences, not an AI explanation.',
+          });
         }
         const lines = extractiveSummary(pages);
         return Response.json({
           text: lines.map(l => `• ${l.text} (page ${l.page})`).join('\n'),
           origin: 'local_text',
-          note: 'No AI provider is configured, so this is a plain extract of your own scanned sentences — not an AI explanation.',
+          note: 'No AI provider is configured, so this is a plain extract of your own scanned sentences — not an AI explanation. No credits were deducted.',
           citations: citationsFor(pages),
+          credits_spent: 0,
+          balance: await wallet(),
         });
       }
+      await rewards.refundAi(user.id, reservation.key, { reason: error?.code || 'action_failed', feature });
       throw error;
     }
     const body2 = String(result.text).slice(0, 20000);
@@ -434,11 +547,15 @@ export function createSpaces({ add, db, fail, rows, ai, rewards, limit, ensurePr
       }));
       await scoped.log({ spaceId, kind: 'notes', topic: titleFor(action, space, pages), detail: action });
     }
+    await rewards.settleAi(user.id, reservation.key, {
+      providerKey: result.provider?.provider_key || '', modelId: result.model?.model_id || '',
+    });
     await scoped.log({ spaceId, kind: 'action', topic: action, detail: truncate(body2, 120) });
     return Response.json({
       text: body2, origin: 'ai', provider: result.provider, model: result.model,
       tokens: (result.inputTokens || 0) + (result.outputTokens || 0), cost_micro: result.costMicro || 0,
-      cached: Boolean(result.cached), citations: citationsFor(pages), balance: spend?.wallet?.balance,
+      cached: Boolean(result.cached), citations: citationsFor(pages),
+      credits_spent: price, balance: await wallet(),
     });
   });
 }

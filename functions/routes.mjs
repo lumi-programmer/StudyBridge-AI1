@@ -2,7 +2,10 @@
 // context, ownership is a server-side predicate on every query, and the browser
 // never supplies an owner id, a balance or a provider key it wants used.
 import { createAi, createCrypto } from './lib/ai.mjs';
+import { createEconomy } from './lib/economy.mjs';
+import { createGateway } from './lib/gateway.mjs';
 import { createRewards } from './lib/rewards.mjs';
+import { createRoles } from './lib/roles.mjs';
 import { generate as generateGame, grade as gradeGame } from './lib/games.mjs';
 import { buildLocalQuiz, importantTerms } from './lib/quiz.mjs';
 import { extractPdfPages, isPdf } from './lib/pdf.mjs';
@@ -11,6 +14,7 @@ import { createSpaces } from './lib/dom/spaces.mjs';
 import { createLibrary } from './lib/dom/library.mjs';
 import { createLearning } from './lib/dom/learn.mjs';
 import { createProviders } from './lib/dom/providers.mjs';
+import { createAdmin } from './lib/dom/admin.mjs';
 import { addDays, bool as toBool, dayOf, int as toInt, jsonValue, text as asText, uuid as asUuid } from './lib/util.mjs';
 import { verifyUploadedObject } from './storage-validation.mjs';
 
@@ -31,6 +35,8 @@ const SAFE_CODES = new Set([
   'quiz_not_found', 'space_required', 'book_not_found', 'chapter_not_found', 'limit_reached',
   'provider_request_failed', 'database_unavailable', 'endpoint_unreachable', 'internal_error',
   'trial_daily_limit', 'trial_total_limit', 'trial_unavailable', 'no_vision_model',
+  'admin_required', 'forbidden', 'free_models_unavailable', 'unverified_model', 'pricing_not_verified',
+  'shared_quota_exhausted', 'invalid_ai_response',
 ]);
 
 export function application({ db, storage, requireUser, BackendError, envProvider, fetchImpl }) {
@@ -63,10 +69,17 @@ export function application({ db, storage, requireUser, BackendError, envProvide
   // Named so the platform WebCrypto global stays reachable: route code below and
   // every domain module calls crypto.randomUUID()/crypto.subtle directly.
   const credentials = createCrypto(name => env(name), fail);
-  const rewards = createRewards({ db, fail, rows });
-  const ai = createAi({ db, fail, rows, env, crypto: credentials, fetch: upstream });
+  // The economy holds the prices, the reward amounts and the limits; the
+  // gateway holds the platform's own free models; the roles table decides who
+  // may change any of it. None of them depend on each other in a cycle.
+  const economy = createEconomy({ db, fail, rows });
+  const roles = createRoles({ db, rows, env });
+  const gateway = createGateway({ db, fail, rows, env, crypto: credentials, fetch: upstream, economy });
+  const rewards = createRewards({ db, fail, rows, economy });
+  const ai = createAi({ db, fail, rows, env, crypto: credentials, fetch: upstream, gateway, economy });
   const ctx = {
     db, storage, fail, rows, env, ai, rewards, credentials, rewardsCatalog: rewards,
+    economy, gateway, roles,
     verifyUploadedObject, buildLocalQuiz, importantTerms, extractPdfPages, isPdf,
     generateGame, gradeGame,
     uuid: value => asUuid(value) || fail('invalid_input', 400),
@@ -207,7 +220,7 @@ export function application({ db, storage, requireUser, BackendError, envProvide
     catch { fail('invalid_input', 400); }
   }
 
-  const domains = [createCore, createSpaces, createLibrary, createLearning, createProviders];
+  const domains = [createCore, createSpaces, createLibrary, createLearning, createProviders, createAdmin];
   for (const domain of domains) domain({ ...ctx, add });
 
   return async function handle(requestContext) {
@@ -251,7 +264,7 @@ const messages = {
   invalid_input: 'That link or form field was not in a form the server accepts. Nothing was changed.',
   not_found: 'That page or item does not exist. It may have been deleted.',
   credentials_not_configured: 'The site is missing its CREDENTIAL_KEY secret. Add it in Site Settings → Secrets, then retry.',
-  no_provider_configured: 'No AI provider is connected yet. Add one in Settings → AI Providers with your own key.',
+  no_provider_configured: 'StudyBridge AI is not connected on this server yet. An administrator has to set the platform AI key; adding your own provider key in Settings also works.',
   trial_daily_limit: 'Today’s free trial requests are used up. Your own provider key in Settings has no platform cap.',
   trial_total_limit: 'This account has used all of its free trial requests. Connect your own provider key in Settings to continue.',
   trial_unavailable: 'The platform free trial did not answer. Try again shortly, or connect your own provider key in Settings.',
@@ -272,7 +285,13 @@ const messages = {
   all_providers_failed: 'No configured provider answered. Test the connection in Settings → AI Providers to read the provider’s own reply.',
   daily_limit_reached: 'You reached your daily AI request limit. Study tools, quizzes and games stay free.',
   rate_limited: 'Too many requests at once. Wait a moment and try again.',
-  insufficient_credits: 'Not enough Bridge Credits for this optional tool. Free study tools are unaffected.',
+  insufficient_credits: 'Not enough Bridge Credits for this request. Earn more from the daily rewards, or use the free study tools.',
+  admin_required: 'This section is for platform administrators.',
+  free_models_unavailable: 'StudyBridge AI is currently experiencing high demand. Your Bridge Credits have not been deducted. Please try again shortly.',
+  shared_quota_exhausted: 'StudyBridge AI is temporarily busy. Please try again later.',
+  invalid_ai_response: 'The AI provider answered, but the reply could not be read as an answer. Nothing was charged and no answer was invented. Please try again.',
+  unverified_model: 'The model that answered is not on the verified free list, so the answer was discarded and no credits were spent.',
+  pricing_not_verified: 'This model’s zero pricing has not been verified yet, so it stays disabled.',
   payload_too_large: 'That file is too large. Try a smaller photo or a PDF under 10 MB.',
   invalid_upload: 'That file was not accepted. Upload a PDF, PNG, JPEG, WebP or HEIC image.',
   upload_pending: 'The file has not finished uploading. Retry in a moment.',

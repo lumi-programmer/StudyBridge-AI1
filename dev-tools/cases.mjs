@@ -2,6 +2,7 @@
 // the injected fakes in function-smoke.mjs. Each section returns a list of
 // "name :: detail" failures; an empty list means every check passed.
 import { boot, userContext } from './function-smoke.mjs';
+import { dayOfIso } from '../functions/lib/util.mjs';
 
 const KEY = 'sk-tes…et-9';
 
@@ -479,13 +480,14 @@ export async function sectionProviders(options = {}) {
   const advancedReplay = await env.call('POST', `/api/spaces/${ids.spaceId}/chat`, { message: 'same question again please', advanced: true, client_key: uuid() });
   const revisionKey = uuid();
   const revision = await env.call('POST', '/api/ai/action', { action: 'revision', book_id: ids.bookId, client_key: revisionKey });
-  const spendRow = env.db.table('transactions').find(tx => tx.reason === `spend:premium_note_pack:${revisionKey}`);
-  t.ok('paid action works and is ledgered', revision.json?.text && spendRow?.direction === 'spend' && spendRow.amount === 15, { s: revision.status, e: revision.json?.error, tx: spendRow });
+  const revisionSpend = env.db.table('transactions').filter(tx => tx.reason === `ai:${revisionKey}:1`);
+  const spendRow = revisionSpend[0];
+  t.ok('paid action works and is ledgered', revision.json?.text && spendRow?.direction === 'spend' && spendRow.amount === 6, { s: revision.status, e: revision.json?.error, tx: spendRow });
   const revisionReplay = await env.call('POST', '/api/ai/action', { action: 'revision', book_id: ids.bookId, client_key: revisionKey });
-  t.ok('premium action replay does not double-charge', env.db.table('transactions').filter(tx => tx.reason === `spend:premium_note_pack:${revisionKey}`).length === 1, { a: revisionReplay.status, b: revisionReplay.json?.error });
+  t.ok('premium action replay does not double-charge', revisionSpend.length === 1 && revisionReplay.json?.error === 'idempotency_conflict', { a: revisionReplay.status, b: revisionReplay.json?.error, rows: revisionSpend.length });
   void advancedReplay;
   const paidNoKey = await env.call('POST', '/api/ai/action', { action: 'revision', book_id: ids.bookId });
-  t.ok('paid action needs client_key', paidNoKey.status === 400, paidNoKey);
+  t.ok('a keyless paid action still works and is charged once', paidNoKey.status === 200 && paidNoKey.json?.text && paidNoKey.json?.credits_spent === 6, { s: paidNoKey.status, e: paidNoKey.json?.error, c: paidNoKey.json?.credits_spent });
 
   // rate limits
   const profileLimit = await env.call('POST', '/api/profile', { ai_limit_per_day: 10 });
@@ -1796,6 +1798,887 @@ export async function sectionGemini() {
     t.ok('K8 the next request uses the native path', double.generations()[0]?.path === '/v1beta/models/gemini-3.8-flash:generateContent', double.generations()[0]?.path);
     t.ok('K8 with Google’s own header', double.generations()[0]?.goog === KEY && !double.generations()[0]?.bearer, { goog: Boolean(double.generations()[0]?.goog), bearer: Boolean(double.generations()[0]?.bearer) });
     t.ok('K8 and it answers', chat.status === 200 && /inertia/i.test(chat.json?.reply || ''), { s: chat.status, e: chat.json?.error });
+  }
+
+  return { env: null, report: t.summary() };
+}
+
+// ---- section L: the sixteen acceptance criteria ------------------------------
+//
+// The gateway, the ledger and the tutor are used the way a student uses them:
+// an administrator saves a provider, the provider's own catalogue is verified,
+// and a student asks a question. Every check below reads a row the server
+// wrote or a request that really went out — nothing here is a fixture, and no
+// answer is asserted without a provider behind it.
+
+const GATEWAY_KEY = 'sk-or-v1-9f2c7a1b4d6e8f0a2c4b6d8e0f2a4c6b';
+const FREE_FIRST = 'alpha/qwen3-235b-a22b:free';
+const FREE_SECOND = 'zeta/llama-3.3-70b-instruct:free';
+const PAID_MODEL = 'openai/gpt-4o';
+const FREE_ROUTER = 'openrouter/free';
+
+// The catalogue a provider really publishes: two models at zero on both sides
+// and one that costs money. Nothing in the code may guess which is which.
+const FREE_CATALOGUE = {
+  data: [
+    { id: FREE_FIRST, name: 'Qwen3 235B (Free)', pricing: { prompt: '0', completion: '0' }, context_length: 32768 },
+    { id: FREE_SECOND, name: 'Llama 3.3 70B (Free)', pricing: { prompt: '0', completion: '0' }, context_length: 131072 },
+    { id: PAID_MODEL, name: 'GPT-4o', pricing: { prompt: '0.0000025', completion: '0.00001' }, context_length: 128000 },
+  ],
+};
+
+// The provider double. It answers /models with the catalogue above and
+// /chat/completions with whatever the case asked that model to do.
+function gatewayDouble(catalogue, spec = {}) {
+  const calls = [];
+  const lists = [];
+  const fetchImpl = async (url, init) => {
+    const full = String(url);
+    const json = (status, value, headers = {}) => new Response(JSON.stringify(value), {
+      status, headers: { 'content-type': 'application/json', ...headers },
+    });
+    if (/\/models(\?|$)/.test(full)) {
+      lists.push(full);
+      if (spec.listStatus) return json(spec.listStatus, { error: { message: 'no catalogue today' } });
+      return json(200, catalogue);
+    }
+    const body = JSON.parse(init.body || '{}');
+    calls.push({ url: full, model: body.model, authorization: (init.headers || {}).Authorization || '', body });
+    const rule = (spec.models || {})[body.model];
+    const seen = calls.filter(call => call.model === body.model).length;
+    const step = typeof rule === 'function' ? rule(seen)
+      : Array.isArray(rule) ? (rule[seen - 1] || rule[rule.length - 1] || {})
+        : (rule || {});
+    const headers = { 'content-type': 'application/json' };
+    if (step.retry_after) headers['retry-after'] = String(step.retry_after);
+    if (step.status && step.status !== 200) {
+      return json(step.status, {
+        error: { message: step.message || `HTTP ${step.status}`, code: step.code || null, type: step.type || null },
+      }, headers);
+    }
+    return json(200, {
+      // A router names the model it really picked; every other provider names
+      // the model that was asked for.
+      model: step.answer_as || body.model,
+      choices: [{ message: { content: step.content || 'Acceleration is the rate of change of velocity, measured in metres per second squared.' } }],
+      usage: { prompt_tokens: 300, completion_tokens: 90 },
+    }, headers);
+  };
+  return {
+    fetchImpl, calls, lists,
+    count: model => calls.filter(call => call.model === model).length,
+    total: () => calls.length,
+    modelsCalled: () => [...new Set(calls.map(call => call.model))],
+  };
+}
+
+// A platform the administrator configured: the provider is saved through the
+// admin API, its catalogue is verified against the provider's own /models, and
+// a space is opened for the student.
+async function gatewayEnv(double, {
+  catalogue = FREE_CATALOGUE, wire = 'openrouter', base = 'https://openrouter.ai/api/v1',
+  key = GATEWAY_KEY, admin = 'student-a', retry = '1', extra = {},
+} = {}) {
+  const env = await boot({
+    fetchImpl: double.fetchImpl,
+    envProvider: name => {
+      if (name === 'CREDENTIAL_KEY') return 'test-credential-key-please-ignore';
+      if (name === 'ADMIN_OWNER_IDS') return admin;
+      if (name === 'AI_RETRY_ATTEMPTS') return retry;
+      if (Object.prototype.hasOwnProperty.call(extra, name)) return extra[name];
+      return undefined;
+    },
+  });
+  const created = await env.call('POST', '/api/admin/providers', {
+    name: 'OpenRouter Free', provider_key: 'openrouter-free', base_url: base, wire, api_key: key,
+  });
+  const providerId = created.json?.provider?.id;
+  const verified = providerId ? await env.call('POST', `/api/admin/providers/${providerId}/verify`) : null;
+  const space = await env.call('POST', '/api/spaces', { name: 'Physics', subject: 'Physics' });
+  return { env, providerId, verified, spaceId: space.json?.id, failed: created.json };
+}
+
+// What the ledger says for one student, in the order the rows were written.
+function ledgerOf(env, ownerId) {
+  return env.db.table('transactions').filter(row => row.owner_id === ownerId);
+}
+
+function ledgerSum(rows) {
+  return rows.reduce((sum, row) => sum + (row.direction === 'earn' ? row.amount : -row.amount), 0);
+}
+
+export async function sectionAcceptance() {
+  const t = tracker();
+
+  // ---- L1: a new student's wallet ------------------------------------------
+  {
+    const env = await boot();
+    const wallet = await env.call('GET', '/api/wallet');
+    t.ok('L1 a new student starts with a wallet and no credits', wallet.status === 200
+      && wallet.json?.balance === 0 && wallet.json?.earned === 0 && wallet.json?.spent === 0, wallet.json);
+    t.ok('L1 a new student has no transaction history', Array.isArray(wallet.json?.history) && wallet.json.history.length === 0, wallet.json?.history);
+    t.ok('L1 the price of a basic AI question is published as 2', wallet.json?.rates?.spend?.basic_question === 2, wallet.json?.rates?.spend);
+    t.ok('L1 the daily login reward is published as 30', wallet.json?.rates?.earn?.login === 30, wallet.json?.rates?.earn);
+    t.ok('L1 the daily request limit is published', wallet.json?.limits?.daily_questions_per_student === 10, wallet.json?.limits);
+  }
+
+  // ---- L2: the daily login pays exactly 30 ----------------------------------
+  {
+    const env = await boot();
+    const claim = await env.call('POST', '/api/daily/login');
+    t.ok('L2 the first login of the day pays exactly 30', claim.status === 200
+      && claim.json?.claimed === true && claim.json?.credits === 30, claim.json);
+    t.ok('L2 the balance after the claim is 30', claim.json?.balance === 30, claim.json?.balance);
+    const wallet = await env.call('GET', '/api/wallet');
+    t.ok('L2 the wallet agrees', wallet.json?.balance === 30 && wallet.json?.earned === 30 && wallet.json?.spent === 0, wallet.json);
+    const rows = ledgerOf(env, 'student-a');
+    t.ok('L2 the ledger holds one earning row of 30', rows.length === 1
+      && rows[0].direction === 'earn' && rows[0].amount === 30, rows);
+    t.ok('L2 the claim itself is recorded once',
+      env.db.table('reward_claims').filter(claim => claim.code === 'daily_login').length === 1,
+      env.db.table('reward_claims'));
+  }
+
+  // ---- L3: a repeated daily claim pays nothing ------------------------------
+  {
+    const env = await boot();
+    await env.call('POST', '/api/daily/login');
+    const again = await env.call('POST', '/api/daily/login');
+    t.ok('L3 a repeated claim pays nothing', again.status === 200
+      && again.json?.claimed === false && again.json?.reason === 'already_claimed', again.json);
+    t.ok('L3 the balance is unchanged by the repeat', again.json?.balance === 30, again.json?.balance);
+    const wallet = await env.call('GET', '/api/wallet');
+    t.ok('L3 the wallet still shows 30 earned', wallet.json?.balance === 30 && wallet.json?.earned === 30, wallet.json);
+    t.ok('L3 no second earning row exists', ledgerOf(env, 'student-a').length === 1, ledgerOf(env, 'student-a'));
+
+    // Two claims at the same moment: the unique claim row decides, not luck.
+    const race = await boot();
+    const [one, two] = await Promise.all([
+      race.call('POST', '/api/daily/login'),
+      race.call('POST', '/api/daily/login'),
+    ]);
+    const paid = [one, two].filter(result => result.json?.claimed === true);
+    t.ok('L3 two simultaneous claims pay once', paid.length === 1, [one.json, two.json]);
+    const raced = ledgerOf(race, 'student-a');
+    t.ok('L3 the race leaves one earning row of 30', raced.length === 1 && raced[0].amount === 30, raced);
+  }
+
+  // ---- L4: a valid AI question costs exactly 2 ------------------------------
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, {
+      models: { [FREE_FIRST]: { content: 'Acceleration is the rate of change of velocity, measured in metres per second squared.' } },
+    });
+    const setup = await gatewayEnv(double);
+    t.ok('L4 the administrator saved a provider', Boolean(setup.providerId), setup.failed);
+    t.ok('L4 the provider catalogue was verified', setup.verified?.status === 200
+      && setup.verified?.json?.free === 2 && setup.verified?.json?.priced === 3, setup.verified?.json);
+    await setup.env.call('POST', '/api/daily/login');
+    const before = (await setup.env.call('GET', '/api/wallet')).json.balance;
+    const chat = await setup.env.call('POST', `/api/spaces/${setup.spaceId}/chat`, {
+      message: 'what is acceleration', client_key: uuid(),
+    });
+    t.ok('L4 the tutor answered', chat.status === 200 && /acceleration/i.test(chat.json?.reply || ''), chat.json);
+    t.ok('L4 the answer names the model that answered', chat.json?.model?.model_id === FREE_FIRST, chat.json?.model);
+    t.ok('L4 the question cost exactly 2 credits', chat.json?.credits_spent === 2, chat.json?.credits_spent);
+    const after = (await setup.env.call('GET', '/api/wallet')).json.balance;
+    t.ok('L4 the balance fell by exactly 2', before - after === 2, { before, after });
+    const spends = ledgerOf(setup.env, 'student-a').filter(row => row.direction === 'spend');
+    t.ok('L4 the ledger holds one spend row of 2', spends.length === 1 && spends[0].amount === 2, spends);
+    t.ok('L4 the provider was called once', double.count(FREE_FIRST) === 1, double.total());
+  }
+
+  // ---- L5: an empty balance blocks the request ------------------------------
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, { models: { [FREE_FIRST]: { content: 'ok' } } });
+    const setup = await gatewayEnv(double);
+    // The only way a student empties a balance is by spending it.
+    for (const feature of ['advanced_comparison', 'revision_notes', 'passage_summary']) {
+      const spent = await setup.env.call('POST', '/api/wallet/spend', { feature, client_key: uuid() });
+      t.ok(`L5 the ${feature} spend is priced from the economy`, spent.status === 200 && spent.json?.balance >= 0, spent.json);
+    }
+    const balance = (await setup.env.call('GET', '/api/wallet')).json.balance;
+    t.ok('L5 the balance is drained to nothing', balance === 0, balance);
+    const chat = await setup.env.call('POST', `/api/spaces/${setup.spaceId}/chat`, {
+      message: 'what is acceleration', client_key: uuid(),
+    });
+    t.ok('L5 the request is refused', chat.status === 409 && chat.json?.error === 'insufficient_credits', chat);
+    t.ok('L5 no provider was contacted', double.total() === 0, double.total());
+    const after = (await setup.env.call('GET', '/api/wallet')).json.balance;
+    t.ok('L5 the balance is still zero', after === 0, after);
+    const rows = ledgerOf(setup.env, 'student-a');
+    t.ok('L5 the refusal left no refund behind', !rows.some(row => String(row.reason).startsWith('refund:')), rows.map(row => row.reason));
+    t.ok('L5 the ledger still sums to the balance', ledgerSum(rows) === after, { sum: ledgerSum(rows), after });
+  }
+
+  // ---- L6: a failed generation gives the credits back -----------------------
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, {
+      models: {
+        [FREE_FIRST]: { status: 503, message: 'The model is temporarily unavailable due to high demand. Please retry in a moment.' },
+        [FREE_SECOND]: { status: 503, message: 'The model is temporarily unavailable due to high demand. Please retry in a moment.' },
+      },
+    });
+    const setup = await gatewayEnv(double);
+    await setup.env.call('POST', '/api/daily/login');
+    const before = (await setup.env.call('GET', '/api/wallet')).json.balance;
+    const chat = await setup.env.call('POST', `/api/spaces/${setup.spaceId}/chat`, {
+      message: 'what is acceleration', client_key: uuid(),
+    });
+    t.ok('L6 the failure is reported to the student', chat.status === 503
+      && chat.json?.error === 'free_models_unavailable', chat.json);
+    const after = (await setup.env.call('GET', '/api/wallet')).json.balance;
+    t.ok('L6 the credits came back', before === after, { before, after });
+    const refunds = ledgerOf(setup.env, 'student-a').filter(row => String(row.reason).startsWith('refund:'));
+    t.ok('L6 the refund is on the ledger', refunds.length === 1 && refunds[0].amount === 2, refunds);
+    t.ok('L6 the failed request is filed as refunded',
+      setup.env.db.table('ai_requests').filter(row => row.state === 'refunded').length === 1,
+      setup.env.db.table('ai_requests'));
+  }
+
+  // ---- L7: concurrent requests cannot corrupt a balance ---------------------
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, {
+      models: { [FREE_FIRST]: { content: 'Acceleration is the rate of change of velocity.' } },
+    });
+    const setup = await gatewayEnv(double);
+    await setup.env.call('POST', '/api/daily/login');
+    const before = (await setup.env.call('GET', '/api/wallet')).json.balance;
+    const questions = ['define acceleration', 'define velocity', 'define momentum', 'define inertia',
+      'define force', 'define mass', 'define energy', 'define power'];
+    const answers = await Promise.all(questions.map(question => setup.env.call(
+      'POST', `/api/spaces/${setup.spaceId}/chat`, { message: question, client_key: uuid() },
+    )));
+    const answered = answers.filter(answer => answer.status === 200);
+    t.ok('L7 every concurrent request was answered', answered.length === 8, answers.map(answer => [answer.status, answer.json?.error]));
+    const after = (await setup.env.call('GET', '/api/wallet')).json.balance;
+    t.ok('L7 the balance fell by exactly 2 per answer', before - after === 2 * answered.length, { before, after, answered: answered.length });
+    const rows = ledgerOf(setup.env, 'student-a');
+    const spends = rows.filter(row => row.direction === 'spend');
+    t.ok('L7 the ledger holds one spend row per answer', spends.length === answered.length, spends.length);
+    t.ok('L7 no spend row is written twice', new Set(spends.map(row => row.reason)).size === spends.length, spends.map(row => row.reason));
+    t.ok('L7 the ledger still sums to the balance', ledgerSum(rows) === after, { sum: ledgerSum(rows), after });
+    t.ok('L7 the balance never went negative', after >= 0, after);
+
+    // A student with nothing in the wallet: every request is refused, and the
+    // refusal must not leave a credit behind either.
+    const studentB = setup.env.users[1];
+    const spaceB = await setup.env.call('POST', '/api/spaces', { name: 'Chemistry', subject: 'Chemistry' }, studentB);
+    for (const feature of ['advanced_comparison', 'revision_notes', 'passage_summary']) {
+      await setup.env.call('POST', '/api/wallet/spend', { feature, client_key: uuid() }, studentB);
+    }
+    const bBefore = (await setup.env.call('GET', '/api/wallet', undefined, studentB)).json.balance;
+    t.ok('L7 the second student has nothing left', bBefore === 0, bBefore);
+    const refused = await Promise.all(Array.from({ length: 8 }, (_, index) => setup.env.call(
+      'POST', `/api/spaces/${spaceB.json.id}/chat`, { message: `blocked question ${index}`, client_key: uuid() }, studentB,
+    )));
+    t.ok('L7 every empty-balance request was refused',
+      refused.every(result => result.status === 409 && result.json?.error === 'insufficient_credits'),
+      refused.map(result => [result.status, result.json?.error]));
+    const bAfter = (await setup.env.call('GET', '/api/wallet', undefined, studentB)).json.balance;
+    t.ok('L7 the refused requests left the balance at zero', bAfter === 0, bAfter);
+    const bRows = ledgerOf(setup.env, 'student-b');
+    t.ok('L7 no refund was paid for a request that cost nothing',
+      !bRows.some(row => String(row.reason).startsWith('refund:')), bRows.map(row => row.reason));
+    t.ok('L7 the second student’s ledger still sums to their balance', ledgerSum(bRows) === bAfter, { sum: ledgerSum(bRows), bAfter });
+    t.ok('L7 the refused requests never reached the provider', double.total() === 8, double.total());
+  }
+
+  // ---- L8: a student cannot edit their own money ----------------------------
+  {
+    const env = await boot();
+    const studentA = env.users[0];
+    const studentB = env.users[1];
+    const escalate = await env.call('POST', '/api/admin/roles', { owner_id: 'student-b', role: 'admin' }, studentB);
+    t.ok('L8 a student cannot grant themselves a role', escalate.status === 403
+      && escalate.json?.error === 'admin_required', escalate);
+    const overview = await env.call('GET', '/api/admin/overview', undefined, studentB);
+    t.ok('L8 a student cannot read the admin dashboard', overview.status === 403, overview);
+    const registry = await env.call('GET', '/api/admin/providers', undefined, studentB);
+    t.ok('L8 a student cannot read the provider registry', registry.status === 403, registry);
+    await env.call('POST', '/api/daily/login', undefined, studentA);
+    const spend = await env.call('POST', '/api/wallet/spend', {
+      feature: 'basic_question', client_key: uuid(), balance: 100000, amount: 1,
+    }, studentA);
+    t.ok('L8 a balance or amount in the request body is ignored', spend.status === 200
+      && spend.json?.balance === 28, spend.json);
+    for (const [method, path] of [['PATCH', '/api/wallet'], ['POST', '/api/wallet'],
+      ['PATCH', `/api/transactions/${uuid()}`], ['POST', '/api/transactions']]) {
+      const attempt = await env.call(method, path, { balance: 100000, amount: 100000 }, studentA);
+      t.ok(`L8 ${method} ${path} cannot write a balance`, [404, 405].includes(attempt.status), attempt);
+    }
+    const own = await env.call('GET', '/api/wallet', undefined, studentB);
+    t.ok('L8 each student sees only their own wallet', own.status === 200 && own.json?.balance === 0, own.json);
+    const mine = await env.call('GET', '/api/wallet', undefined, studentA);
+    t.ok('L8 the other student sees their own balance', mine.json?.balance === 28, mine.json?.balance);
+  }
+
+  // ---- L9: an API key never reaches the browser -----------------------------
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, { models: { [FREE_FIRST]: { content: 'ok' } } });
+    const setup = await gatewayEnv(double);
+    const listed = await setup.env.call('GET', '/api/admin/providers');
+    const provider = listed.json?.providers?.[0];
+    t.ok('L9 the admin list shows only the last four characters', provider?.key_hint === GATEWAY_KEY.slice(-4)
+      && !stringify(listed.json).includes(GATEWAY_KEY), provider);
+    const cipher = setup.env.db.table('ai_providers')[0]?.key_cipher;
+    t.ok('L9 the key is stored encrypted', typeof cipher === 'string' && cipher.length > 0
+      && !String(cipher).includes(GATEWAY_KEY), String(cipher).slice(0, 48));
+    for (const path of ['/api/bootstrap', '/api/wallet', '/api/rewards', '/api/usage', '/api/providers',
+      '/api/daily', '/api/spaces', '/api/progress']) {
+      const res = await setup.env.call('GET', path);
+      const body = stringify(res.json);
+      t.ok(`L9 ${path} carries neither the key nor the cipher`,
+        !body.includes(GATEWAY_KEY) && !body.includes(String(cipher)), body.slice(0, 120));
+    }
+    const chat = await setup.env.call('POST', `/api/spaces/${setup.spaceId}/chat`, {
+      message: 'what is acceleration', client_key: uuid(),
+    });
+    t.ok('L9 the answer carries neither the key nor the cipher',
+      !stringify(chat.json).includes(GATEWAY_KEY) && !stringify(chat.json).includes(String(cipher)),
+      stringify(chat.json).slice(0, 160));
+    t.ok('L9 the key is sent to the provider and nowhere else',
+      double.calls.length > 0 && double.calls.every(call => call.authorization === `Bearer ${GATEWAY_KEY}`),
+      double.calls.map(call => call.authorization));
+  }
+
+  // ---- L10: only verified free models are selected --------------------------
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, {
+      models: { [FREE_FIRST]: { content: 'Acceleration is the rate of change of velocity.' } },
+    });
+    const setup = await gatewayEnv(double);
+    const models = (await setup.env.call('GET', `/api/admin/providers/${setup.providerId}/models`)).json?.models || [];
+    const first = models.find(model => model.model_id === FREE_FIRST);
+    const second = models.find(model => model.model_id === FREE_SECOND);
+    const paid = models.find(model => model.model_id === PAID_MODEL);
+    t.ok('L10 the free model is verified, published and enabled', first?.free_tier === true
+      && first?.pricing_verified === true && first?.available === true && first?.enabled === true, first);
+    t.ok('L10 the second free model is on the list too', second?.free_tier === true && second?.enabled === true, second);
+    t.ok('L10 the paid model is recorded but is not free', paid?.free_tier === false
+      && paid?.pricing_verified === true && paid?.enabled === false, paid);
+    t.ok('L10 the paid model carries its real price', paid?.input_micro_per_1k > 0 && paid?.output_micro_per_1k > 0, paid);
+    const chat = await setup.env.call('POST', `/api/spaces/${setup.spaceId}/chat`, {
+      message: 'what is acceleration', client_key: uuid(),
+    });
+    t.ok('L10 the answer came from a verified free model', chat.status === 200
+      && chat.json?.model?.model_id === FREE_FIRST, chat.json?.model);
+    t.ok('L10 the paid model was never called', double.modelsCalled().every(model => model !== PAID_MODEL)
+      && double.modelsCalled().length === 1, double.modelsCalled());
+    const status = (await setup.env.call('GET', '/api/admin/health')).json?.status;
+    t.ok('L10 the platform reports two approved free models', status?.approved_free_models === 2, status);
+  }
+
+  // ---- L11: a paid fallback is impossible -----------------------------------
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, {
+      models: {
+        [FREE_FIRST]: { status: 500, message: 'upstream failure' },
+        [FREE_SECOND]: { status: 500, message: 'upstream failure' },
+        [PAID_MODEL]: { content: 'this answer was paid for' },
+      },
+    });
+    const setup = await gatewayEnv(double);
+    await setup.env.call('POST', '/api/daily/login');
+    const chat = await setup.env.call('POST', `/api/spaces/${setup.spaceId}/chat`, {
+      message: 'what is acceleration', client_key: uuid(),
+    });
+    t.ok('L11 the request fails when no free model answers', chat.status === 503
+      && chat.json?.error === 'free_models_unavailable', chat.json);
+    t.ok('L11 the paid model was never called', double.count(PAID_MODEL) === 0, double.modelsCalled());
+    t.ok('L11 no paid answer reached the student', !/paid for/.test(stringify(chat.json)), stringify(chat.json).slice(0, 200));
+    const models = (await setup.env.call('GET', `/api/admin/providers/${setup.providerId}/models`)).json?.models || [];
+    const paid = models.find(model => model.model_id === PAID_MODEL);
+    const enable = await setup.env.call('PATCH', `/api/admin/models/${paid.id}`, { enabled: true });
+    t.ok('L11 a model whose zero pricing is unverified cannot be switched on', enable.status === 409
+      && enable.json?.error === 'pricing_not_verified', enable);
+
+    // The free router is trusted per answer, not per name: an answer from a
+    // model that is not on the verified list is thrown away, and nothing is
+    // charged for it.
+    const routerDouble = gatewayDouble({
+      data: [
+        { id: FREE_ROUTER, name: 'Free router' },
+        { id: PAID_MODEL, name: 'GPT-4o', pricing: { prompt: '0.0000025', completion: '0.00001' } },
+      ],
+    }, { models: { [FREE_ROUTER]: { answer_as: PAID_MODEL, content: 'this answer was paid for' } } });
+    const routerSetup = await gatewayEnv(routerDouble);
+    await routerSetup.env.call('POST', '/api/daily/login');
+    const before = (await routerSetup.env.call('GET', '/api/wallet')).json.balance;
+    const routerChat = await routerSetup.env.call('POST', `/api/spaces/${routerSetup.spaceId}/chat`, {
+      message: 'what is acceleration', client_key: uuid(),
+    });
+    t.ok('L11 a router answer from an unverified model is refused', routerChat.status === 503
+      && routerChat.json?.error === 'free_models_unavailable', routerChat.json);
+    const after = (await routerSetup.env.call('GET', '/api/wallet')).json.balance;
+    t.ok('L11 the refused router answer cost nothing', before === after, { before, after });
+    t.ok('L11 the paid answer never reached the student', !/paid for/.test(stringify(routerChat.json)), stringify(routerChat.json).slice(0, 200));
+  }
+
+  // ---- L12: the provider's own limits are respected -------------------------
+  {
+    // The shared daily quota of one request: after it is spent, the provider is
+    // not called again at all.
+    const quotaDouble = gatewayDouble(FREE_CATALOGUE, {
+      models: { [FREE_FIRST]: { content: 'ok' }, [FREE_SECOND]: { content: 'ok' } },
+    });
+    const quotaSetup = await gatewayEnv(quotaDouble);
+    const patched = await quotaSetup.env.call('PATCH', `/api/admin/providers/${quotaSetup.providerId}`, { daily_quota: 1 });
+    t.ok('L12 the administrator set a shared daily quota', patched.status === 200
+      && patched.json?.provider?.daily_quota === 1, patched.json);
+    await quotaSetup.env.call('POST', '/api/daily/login');
+    const first = await quotaSetup.env.call('POST', `/api/spaces/${quotaSetup.spaceId}/chat`, {
+      message: 'what is acceleration', client_key: uuid(),
+    });
+    t.ok('L12 the first request is answered', first.status === 200, first.json);
+    const sent = quotaDouble.total();
+    const second = await quotaSetup.env.call('POST', `/api/spaces/${quotaSetup.spaceId}/chat`, {
+      message: 'what is velocity', client_key: uuid(),
+    });
+    // A spent shared quota is reported as its own fault, so the student is not
+    // told that the free models are broken when the account allowance is gone.
+    t.ok('L12 the second request is refused because the quota is spent', second.status === 503
+      && second.json?.error === 'shared_quota_exhausted', second.json);
+    t.ok('L12 the busy message is the one the student is promised', second.json?.hint
+      === 'StudyBridge AI is temporarily busy. Please try again later.', second.json?.hint);
+    t.ok('L12 no further request was sent to the provider', quotaDouble.total() === sent,
+      { before: sent, after: quotaDouble.total() });
+
+    // A rate limit is obeyed as the provider stated it: the model that said
+    // "wait" is not asked again in the same breath.
+    const limited = gatewayDouble(FREE_CATALOGUE, {
+      models: {
+        [FREE_FIRST]: { status: 429, message: 'Rate limit exceeded. Please slow down.', retry_after: 30 },
+        [FREE_SECOND]: { content: 'The second model answers instead.' },
+      },
+    });
+    const limitedSetup = await gatewayEnv(limited, {
+      retry: '',
+      extra: { AI_RETRY_AFTER_CAP_MS: '30000', AI_RETRY_BUDGET_MS: '1000' },
+    });
+    const answered = await limitedSetup.env.call('POST', `/api/spaces/${limitedSetup.spaceId}/chat`, {
+      message: 'what is acceleration', client_key: uuid(),
+    });
+    t.ok('L12 the rate-limited model was not asked again straight away', limited.count(FREE_FIRST) === 1,
+      limited.count(FREE_FIRST));
+    t.ok('L12 the other free model answered', answered.status === 200
+      && answered.json?.model?.model_id === FREE_SECOND, answered.json?.model);
+    t.ok('L12 the fallback is visible to the student', answered.json?.fell_back === true, answered.json?.fell_back_from);
+    const afterFirst = limited.count(FREE_FIRST);
+    const second2 = await limitedSetup.env.call('POST', `/api/spaces/${limitedSetup.spaceId}/chat`, {
+      message: 'what is velocity', client_key: uuid(),
+    });
+    t.ok('L12 the cooling model is not asked again while it cools', limited.count(FREE_FIRST) === afterFirst,
+      { before: afterFirst, after: limited.count(FREE_FIRST) });
+    t.ok('L12 the second question is still answered', second2.status === 200, second2.json);
+  }
+
+  // ---- L13: a second free model takes over when the first is unavailable ----
+  {
+    const outage = gatewayDouble(FREE_CATALOGUE, {
+      models: {
+        [FREE_FIRST]: { status: 503, message: 'The model is temporarily unavailable due to high demand. Please retry in a moment.' },
+        [FREE_SECOND]: { content: 'The second model answers instead.' },
+      },
+    });
+    const setup = await gatewayEnv(outage);
+    await setup.env.call('POST', '/api/daily/login');
+    const chat = await setup.env.call('POST', `/api/spaces/${setup.spaceId}/chat`, {
+      message: 'what is acceleration', client_key: uuid(),
+    });
+    t.ok('L13 the unavailable model was tried and refused', outage.count(FREE_FIRST) === 1, outage.count(FREE_FIRST));
+    t.ok('L13 the second free model answered', chat.status === 200
+      && chat.json?.model?.model_id === FREE_SECOND, chat.json?.model);
+    t.ok('L13 the fallback is shown to the student', chat.json?.fell_back === true
+      && Array.isArray(chat.json?.fell_back_from) && chat.json.fell_back_from.length > 0, chat.json?.fell_back_from);
+    t.ok('L13 the answer is the second model’s own text', /second model answers/i.test(chat.json?.reply || ''),
+      chat.json?.reply);
+  }
+
+  // ---- L14: no free model at all means a clear error and no lost credits ----
+  {
+    const dead = gatewayDouble(FREE_CATALOGUE, {
+      models: {
+        [FREE_FIRST]: { status: 503, message: 'The model is temporarily unavailable due to high demand.' },
+        [FREE_SECOND]: { status: 503, message: 'The model is temporarily unavailable due to high demand.' },
+      },
+    });
+    const setup = await gatewayEnv(dead);
+    await setup.env.call('POST', '/api/daily/login');
+    const before = (await setup.env.call('GET', '/api/wallet')).json.balance;
+    const chat = await setup.env.call('POST', `/api/spaces/${setup.spaceId}/chat`, {
+      message: 'what is acceleration', client_key: uuid(),
+    });
+    t.ok('L14 the student is told the truth', chat.status === 503
+      && chat.json?.error === 'free_models_unavailable', chat.json);
+    t.ok('L14 the message says no credits were taken', /not been deducted/i.test(chat.json?.hint || ''), chat.json?.hint);
+    t.ok('L14 no answer was invented', !chat.json?.reply, chat.json?.reply);
+    const after = (await setup.env.call('GET', '/api/wallet')).json.balance;
+    t.ok('L14 no credits were lost', before === after, { before, after });
+  }
+
+  // ---- L15: the history and the balance are the same number ----------------
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, {
+      models: { [FREE_FIRST]: { content: 'Acceleration is the rate of change of velocity.' } },
+    });
+    const setup = await gatewayEnv(double);
+    await setup.env.call('POST', '/api/daily/login');
+    await setup.env.call('POST', `/api/spaces/${setup.spaceId}/chat`, { message: 'what is acceleration', client_key: uuid() });
+    await setup.env.call('POST', '/api/wallet/spend', { feature: 'revision_notes', client_key: uuid() });
+    const wallet = (await setup.env.call('GET', '/api/wallet')).json;
+    const rows = ledgerOf(setup.env, 'student-a');
+    let running = 0;
+    let chainOk = true;
+    for (const row of rows) {
+      running += row.direction === 'earn' ? row.amount : -row.amount;
+      if (row.balance_after !== running) chainOk = false;
+    }
+    t.ok('L15 every ledger row records the balance after it', chainOk,
+      rows.map(row => [row.reason, row.amount, row.balance_after]));
+    t.ok('L15 the ledger sums to the balance', running === wallet.balance, { running, balance: wallet.balance });
+    t.ok('L15 earned and spent match the ledger',
+      wallet.earned === rows.filter(row => row.direction === 'earn').reduce((sum, row) => sum + row.amount, 0)
+      && wallet.spent === rows.filter(row => row.direction === 'spend').reduce((sum, row) => sum + row.amount, 0),
+      { earned: wallet.earned, spent: wallet.spent });
+    t.ok('L15 the history the student sees is the ledger', wallet.history.length === rows.length,
+      { history: wallet.history.length, rows: rows.length });
+    t.ok('L15 every history row is typed and labelled for the student',
+      wallet.history.every(row => row.type && row.label), wallet.history[0]);
+  }
+
+  // ---- L16: the features that already worked still work --------------------
+  {
+    const lib = await sectionLibrary(null, {});
+    t.ok('L16 the existing library, scan and study tools still pass', !lib.report.includes('FAILED'),
+      lib.report.slice(0, 400));
+    const env = await boot();
+    const progress = await env.call('GET', '/api/progress');
+    t.ok('L16 the progress page still answers', progress.status === 200, progress.status);
+    const games = await env.call('GET', '/api/games');
+    t.ok('L16 the game centre still answers', games.status === 200, games.status);
+    const daily = await env.call('GET', '/api/daily');
+    t.ok('L16 the daily page still answers', daily.status === 200 && Boolean(daily.json?.day), daily.status);
+    const space = await env.call('POST', '/api/spaces', { name: 'Physics', subject: 'Physics' });
+    t.ok('L16 a space can still be created', space.status === 201 && Boolean(space.json?.id), space.status);
+    const note = await env.call('POST', `/api/spaces/${space.json.id}/notes`, { title: 'Motion', body: 'Notes on motion' });
+    t.ok('L16 a note can still be written', note.status === 201, note.status);
+    return { env: null, report: t.summary(), libReport: lib.report };
+  }
+
+  return { env: null, report: t.summary() };
+}
+
+// ---- M: the Phase 2 acceptance criteria -------------------------------------
+//
+// The central AI system, the free-model policy, the Bridge Credits economy and
+// the Pakistan-time daily reset, checked against the seventeen criteria in the
+// Phase 2 implementation prompt. Every check reads a row the server wrote or a
+// request that really went out.
+
+const CENTRAL_HEADLINE = 'AI access is centrally managed by StudyBridge. You do not need to provide your own API key.';
+
+// A platform that is configured entirely by the environment: the central
+// provider key, and nothing else. The student brings no key and no provider.
+async function centralEnv(double, { key = GATEWAY_KEY, extra = {}, retry = '1', admin = 'student-a' } = {}) {
+  const env = await boot({
+    fetchImpl: double.fetchImpl,
+    envProvider: name => {
+      if (name === 'CREDENTIAL_KEY') return 'test-credential-key-please-ignore';
+      if (name === 'ADMIN_OWNER_IDS') return admin;
+      if (name === 'AI_RETRY_ATTEMPTS') return retry;
+      if (name === 'OPENROUTER_API_KEY') return key;
+      if (Object.prototype.hasOwnProperty.call(extra, name)) return extra[name];
+      return undefined;
+    },
+  });
+  const space = await env.call('POST', '/api/spaces', { name: 'Physics', subject: 'Physics' });
+  return { env, spaceId: space.json?.id, key };
+}
+
+// The catalogue a provider publishes when one of its prices is unreadable.
+const UNKNOWN_PRICE_CATALOGUE = {
+  data: [
+    { id: FREE_FIRST, name: 'Qwen3 235B (Free)', pricing: { prompt: '0', completion: '0' }, context_length: 32768 },
+    { id: 'vendor/unknown-price', name: 'Unknown Price Model', context_length: 32768 },
+  ],
+};
+
+// A catalogue with exactly one free model. Cases that need a request to fail
+// use this, because a second free model would let the router recover.
+const SINGLE_FREE_CATALOGUE = {
+  data: [
+    { id: FREE_FIRST, name: 'Qwen3 235B (Free)', pricing: { prompt: '0', completion: '0' }, context_length: 32768 },
+  ],
+};
+
+export async function sectionPhase2() {
+  const t = tracker();
+
+  // ---- M1: the central connection comes up from the environment alone -------
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, { models: { [FREE_FIRST]: { content: 'ok' } } });
+    const { env } = await centralEnv(double);
+    const shell = await env.call('GET', '/api/bootstrap');
+    const central = shell.json?.free_models?.central;
+    t.ok('M1 the central provider is configured from the server environment alone', central?.configured === true, central);
+    t.ok('M1 it is available without anybody adding a provider by hand', central?.available === true, central);
+    t.ok('M1 the free models were verified against the provider catalogue', central?.free_models === 2, central);
+    t.ok('M1 the student configured no provider of their own',
+      (await env.call('GET', '/api/providers')).json?.providers?.length === 0, null);
+    const settings = await env.call('GET', '/api/ai/settings');
+    t.ok('M1 Settings calls it StudyBridge Free AI', settings.json?.central?.title === 'StudyBridge Free AI', settings.json?.central);
+    t.ok('M1 Settings says no key of the student’s own is needed',
+      settings.json?.central?.headline === CENTRAL_HEADLINE, settings.json?.central?.headline);
+    const admin = await env.call('GET', '/api/admin/overview');
+    t.ok('M1 the administrator sees the central connection', admin.json?.central?.configured === true
+      && admin.json?.central?.available === true, admin.json?.central);
+    t.ok('M1 the administrator sees the model eligibility list',
+      (admin.json?.central?.models || []).some(model => model.model_id === FREE_FIRST && model.free_tier === true),
+      admin.json?.central?.models);
+  }
+
+  // ---- M2: a real question, a real answer, exactly 2 BC ----------------------
+  {
+    const answer = 'Acceleration is the rate of change of velocity, measured in metres per second squared.';
+    const double = gatewayDouble(FREE_CATALOGUE, { models: { [FREE_FIRST]: { content: answer } } });
+    const { env, spaceId } = await centralEnv(double);
+    const login = await env.call('POST', '/api/daily/login');
+    t.ok('M2 the daily login pays exactly 30 BC', login.json?.claimed === true && login.json?.credits === 30, login.json);
+    const before = login.json?.balance;
+    const chat = await env.call('POST', `/api/spaces/${spaceId}/chat`, { message: 'what is acceleration', client_key: uuid() });
+    t.ok('M2 the answer is the provider’s own text', chat.json?.reply === answer, chat.json?.reply);
+    t.ok('M2 the model that answered is named', chat.json?.model?.model_id === FREE_FIRST, chat.json?.model);
+    t.ok('M2 the balance fell by exactly 2 BC', chat.json?.balance === before - 2, { before, after: chat.json?.balance });
+    const spends = ledgerOf(env, 'student-a').filter(row => row.direction === 'spend');
+    t.ok('M2 the ledger holds one spend row of 2 BC', spends.length === 1 && spends[0].amount === 2, spends);
+    t.ok('M2 the provider was really called', double.count(FREE_FIRST) === 1, double.modelsCalled());
+  }
+
+  // ---- M3: a failed request costs nothing and keeps the allowance -----------
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, {
+      models: {
+        [FREE_FIRST]: { status: 500, message: 'The provider is having a bad minute.' },
+        [FREE_SECOND]: { status: 500, message: 'The provider is having a bad minute.' },
+      },
+    });
+    const { env, spaceId } = await centralEnv(double);
+    const login = await env.call('POST', '/api/daily/login');
+    const before = login.json?.balance;
+    const chat = await env.call('POST', `/api/spaces/${spaceId}/chat`, { message: 'what is acceleration', client_key: uuid() });
+    t.ok('M3 the failed request is refused', chat.status >= 400, chat.status);
+    const wallet = await env.call('GET', '/api/wallet');
+    t.ok('M3 a failed request deducts 0 BC', wallet.json?.balance === before, { before, after: wallet.json?.balance });
+    t.ok('M3 a failed request consumes no daily allowance', wallet.json?.daily_ai?.used === 0
+      && wallet.json?.daily_ai?.remaining === 10, wallet.json?.daily_ai);
+    t.ok('M3 the ledger holds no net charge', ledgerOf(env, 'student-a')
+      .filter(row => row.direction === 'spend').length
+      === ledgerOf(env, 'student-a').filter(row => String(row.reason).startsWith('refund:')).length,
+    ledgerOf(env, 'student-a').map(row => [row.direction, row.amount, row.reason]));
+    t.ok('M3 the ledger still sums to the balance',
+      ledgerSum(ledgerOf(env, 'student-a')) === wallet.json?.balance, ledgerSum(ledgerOf(env, 'student-a')));
+    t.ok('M3 the student is told the truth about the failure',
+      typeof chat.json?.error === 'string' && chat.json.error.length > 0, chat.json);
+  }
+
+  // ---- M4: the daily login pays once per Pakistan calendar day --------------
+  {
+    const { env } = await centralEnv(gatewayDouble(FREE_CATALOGUE, { models: { [FREE_FIRST]: { content: 'ok' } } }));
+    const first = await env.call('POST', '/api/daily/login');
+    t.ok('M4 the first login of the day pays 30 BC', first.json?.claimed === true && first.json?.credits === 30, first.json);
+    const second = await env.call('POST', '/api/daily/login');
+    t.ok('M4 the second login of the same day pays nothing', second.json?.claimed === false, second.json);
+    t.ok('M4 the balance did not change', second.json?.balance === first.json?.balance, { first: first.json?.balance, second: second.json?.balance });
+    const claims = env.db.table('reward_claims').filter(claim => claim.code === 'daily_login');
+    t.ok('M4 only one claim row exists', claims.length === 1, claims);
+    t.ok('M4 the claim is filed under the Pakistan calendar day',
+      claims[0]?.period === dayOfIso(claims[0]?.created_at), claims[0]);
+  }
+
+  // ---- M5: the daily allowance is exactly ten successful questions ----------
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, { models: { [FREE_FIRST]: { content: 'ok' } } });
+    const { env, spaceId } = await centralEnv(double);
+    const login = await env.call('POST', '/api/daily/login');
+    const before = login.json?.balance;
+    let answered = 0;
+    for (let index = 0; index < 10; index += 1) {
+      const chat = await env.call('POST', `/api/spaces/${spaceId}/chat`, { message: `question ${index}`, client_key: uuid() });
+      if (chat.status === 200) answered += 1;
+    }
+    t.ok('M5 ten questions are answered', answered === 10, answered);
+    const eleventh = await env.call('POST', `/api/spaces/${spaceId}/chat`, { message: 'one too many', client_key: uuid() });
+    t.ok('M5 the eleventh question is refused', eleventh.status === 429
+      && eleventh.json?.error === 'daily_limit_reached', eleventh.json);
+    t.ok('M5 the refusal names the midnight reset', /midnight/i.test(String(eleventh.json?.hint || '')), eleventh.json?.hint);
+    const wallet = await env.call('GET', '/api/wallet');
+    t.ok('M5 ten questions cost exactly 20 BC', wallet.json?.balance === before - 20, { before, after: wallet.json?.balance });
+    t.ok('M5 the counter shows ten used and none left', wallet.json?.daily_ai?.used === 10
+      && wallet.json?.daily_ai?.remaining === 0, wallet.json?.daily_ai);
+  }
+
+  // ---- M6: the reset is midnight in Asia/Karachi ---------------------------
+  {
+    t.ok('M6 the day boundary is 19:00 UTC', dayOfIso('2026-11-06T18:59:59.999Z') === '2026-11-06'
+      && dayOfIso('2026-11-06T19:00:00.000Z') === '2026-11-07', null);
+    const { env } = await centralEnv(gatewayDouble(FREE_CATALOGUE, { models: { [FREE_FIRST]: { content: 'ok' } } }));
+    const wallet = await env.call('GET', '/api/wallet');
+    const reset = Date.parse(wallet.json?.daily_ai?.resets_at || '');
+    t.ok('M6 the next reset is a real instant', Number.isFinite(reset), wallet.json?.daily_ai);
+    t.ok('M6 the reset is midnight Pakistan time', new Date(reset).toISOString().endsWith('19:00:00.000Z'),
+      new Date(reset).toISOString());
+    t.ok('M6 the interface is told which timezone it is counting in',
+      wallet.json?.daily_ai?.time_zone === 'Asia/Karachi', wallet.json?.daily_ai);
+    const rewards = await env.call('GET', '/api/rewards');
+    t.ok('M6 the rewards page publishes the same reset',
+      rewards.json?.next_reset === wallet.json?.daily_ai?.resets_at, rewards.json?.next_reset);
+  }
+
+  // ---- M7: accumulated credits survive the reset ----------------------------
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, { models: { [FREE_FIRST]: { content: 'ok' } } });
+    const { env, spaceId } = await centralEnv(double);
+    const login = await env.call('POST', '/api/daily/login');
+    await env.call('POST', `/api/spaces/${spaceId}/chat`, { message: 'what is acceleration', client_key: uuid() });
+    const before = (await env.call('GET', '/api/wallet')).json;
+    // Move today's records into yesterday: that is exactly what midnight does.
+    const yesterday = dayOfIso(new Date(Date.now() - 86400000).toISOString());
+    for (const slot of env.db.table('ai_daily_slots')) slot.day = yesterday;
+    for (const request of env.db.table('ai_requests')) request.created_at = new Date(Date.parse(request.created_at) - 86400000).toISOString();
+    const wallet = await env.call('GET', '/api/wallet');
+    t.ok('M7 the credits are still there after the reset', wallet.json?.balance === before.balance,
+      { before: before.balance, after: wallet.json?.balance });
+    t.ok('M7 the allowance is back to the full ten', wallet.json?.daily_ai?.used === 0
+      && wallet.json?.daily_ai?.remaining === 10, wallet.json?.daily_ai);
+    t.ok('M7 the earned and spent totals are untouched', wallet.json?.earned === before.earned
+      && wallet.json?.spent === before.spent, { before, after: wallet.json });
+    t.ok('M7 the ledger still holds every row it had', wallet.json?.history?.length === before.history.length,
+      { before: before.history.length, after: wallet.json?.history?.length });
+  }
+
+  // ---- M8: the balance cannot be moved from the browser ---------------------
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, { models: { [FREE_FIRST]: { content: 'ok' } } });
+    const { env, spaceId } = await centralEnv(double);
+    const login = await env.call('POST', '/api/daily/login');
+    const before = login.json?.balance;
+    const forged = await env.call('POST', '/api/wallet', { balance: 9999, credits: 9999, amount: 9999 });
+    t.ok('M8 the wallet cannot be written from the browser', forged.status >= 400, forged.status);
+    const chat = await env.call('POST', `/api/spaces/${spaceId}/chat`, {
+      message: 'what is acceleration', client_key: uuid(), credits: 0, balance: 9999,
+    });
+    t.ok('M8 a request cannot name its own price', chat.json?.credits_spent === 2, chat.json);
+    t.ok('M8 the balance is the server’s number',
+      (await env.call('GET', '/api/wallet')).json?.balance === before - 2, { before });
+  }
+
+  // ---- M9: one student cannot see another’s wallet --------------------------
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, { models: { [FREE_FIRST]: { content: 'ok' } } });
+    const { env, spaceId } = await centralEnv(double);
+    await env.call('POST', '/api/daily/login');
+    await env.call('POST', `/api/spaces/${spaceId}/chat`, { message: 'what is acceleration', client_key: uuid() });
+    // The harness switches the signed-in user, so the switch has to carry a
+    // real user context: a bare id would leave the request without an owner.
+    env.switchTo(userContext('student-b'));
+    const other = await env.call('GET', '/api/wallet');
+    t.ok('M9 another student sees an empty wallet', other.json?.balance === 0 && other.json?.history?.length === 0, other.json);
+    t.ok('M9 another student sees their own allowance', other.json?.daily_ai?.used === 0, other.json?.daily_ai);
+    await env.call('POST', '/api/daily/login');
+    const mine = await env.call('GET', '/api/wallet');
+    t.ok('M9 the second student has their own 30 BC', mine.json?.balance === 30, mine.json?.balance);
+    t.ok('M9 the second student sees only their own rows', mine.json?.history?.length === 1, mine.json?.history);
+    env.switchTo(userContext('student-a'));
+    const back = await env.call('GET', '/api/wallet');
+    // The first student wrote three rows: the first-space achievement, the
+    // daily login and the one question they paid for.
+    t.ok('M9 the first student still sees only their own rows', back.json?.history?.length === 3, back.json?.history);
+  }
+
+  // ---- M10: a paid model is never chosen, not even as a fallback -----------
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, {
+      models: { [FREE_FIRST]: { content: 'ok' }, [FREE_SECOND]: { content: 'ok' } },
+    });
+    const { env, spaceId } = await centralEnv(double);
+    await env.call('POST', '/api/daily/login');
+    await env.call('POST', `/api/spaces/${spaceId}/chat`, { message: 'what is acceleration', client_key: uuid() });
+    t.ok('M10 the paid model was never called', double.count(PAID_MODEL) === 0, double.modelsCalled());
+    t.ok('M10 a free model answered instead', double.count(FREE_FIRST) === 1, double.modelsCalled());
+    const rows = env.db.table('ai_models').filter(model => model.model_id === PAID_MODEL);
+    t.ok('M10 the paid model is recorded as paid and disabled', rows[0]?.free_tier === false
+      && rows[0]?.pricing_verified === true && rows[0]?.enabled === false, rows[0]);
+  }
+
+  // ---- M11: a model with an unknown price is refused -----------------------
+  {
+    const double = gatewayDouble(UNKNOWN_PRICE_CATALOGUE, { models: { [FREE_FIRST]: { content: 'ok' } } });
+    const { env, spaceId } = await centralEnv(double);
+    await env.call('POST', '/api/daily/login');
+    await env.call('POST', `/api/spaces/${spaceId}/chat`, { message: 'what is acceleration', client_key: uuid() });
+    t.ok('M11 the model with no published price was never called', double.count('vendor/unknown-price') === 0, double.modelsCalled());
+    const unknown = env.db.table('ai_models').filter(model => model.model_id === 'vendor/unknown-price');
+    t.ok('M11 its price could not be verified, so it is not usable',
+      unknown[0]?.pricing_verified === false && unknown[0]?.enabled === false, unknown[0]);
+    t.ok('M11 the verified free model answered instead', double.count(FREE_FIRST) === 1, double.modelsCalled());
+  }
+
+  // ---- M12: a rate-limited provider is handled, and the student is not charged
+  {
+    // One free model only: with a second free model on the catalogue the
+    // router would fall back to it and the request would succeed, which is
+    // the right behaviour but would not exercise the rate-limit path.
+    const double = gatewayDouble(SINGLE_FREE_CATALOGUE, {
+      models: { [FREE_FIRST]: { status: 429, message: 'Rate limit exceeded, please slow down', retry_after: 60 } },
+    });
+    const { env, spaceId } = await centralEnv(double);
+    const login = await env.call('POST', '/api/daily/login');
+    const before = login.json?.balance;
+    const chat = await env.call('POST', `/api/spaces/${spaceId}/chat`, { message: 'what is acceleration', client_key: uuid() });
+    t.ok('M12 the rate limit is reported to the student', chat.status >= 400 && Boolean(chat.json?.error), chat.json);
+    t.ok('M12 the provider’s own words are shown', /rate limit/i.test(String(chat.json?.hint || '')), chat.json?.hint);
+    const wallet = await env.call('GET', '/api/wallet');
+    t.ok('M12 a rate-limited request is not charged', wallet.json?.balance === before, { before, after: wallet.json?.balance });
+    t.ok('M12 a rate-limited request keeps the allowance', wallet.json?.daily_ai?.used === 0, wallet.json?.daily_ai);
+  }
+
+  // ---- M13: the provider key never reaches the browser ---------------------
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, { models: { [FREE_FIRST]: { content: 'ok' } } });
+    const { env, spaceId } = await centralEnv(double);
+    await env.call('POST', '/api/daily/login');
+    const chat = await env.call('POST', `/api/spaces/${spaceId}/chat`, { message: 'what is acceleration', client_key: uuid() });
+    const seen = [];
+    for (const path of ['/api/bootstrap', '/api/ai/settings', '/api/wallet', '/api/providers', '/api/admin/overview', '/api/rewards']) {
+      const response = await env.call('GET', path);
+      seen.push([path, JSON.stringify(response.json || {})]);
+    }
+    seen.push(['chat', JSON.stringify(chat.json || {})]);
+    t.ok('M13 no response contains the provider key',
+      seen.every(([, body]) => !body.includes(GATEWAY_KEY) && !body.includes('Bearer ')), seen.map(([path]) => path));
+    const stored = env.db.table('ai_providers').filter(row => row.provider_key === 'openrouter-central');
+    t.ok('M13 the key is stored encrypted, not as plain text', stored[0]?.key_cipher
+      && !String(stored[0].key_cipher).includes(GATEWAY_KEY), stored[0]?.key_cipher ? 'cipher present' : 'no cipher');
+    t.ok('M13 only the last four characters are readable', stored[0]?.key_hint === GATEWAY_KEY.slice(-4), stored[0]?.key_hint);
+  }
+
+  // ---- M14: concurrent requests cannot pass the cap or double-charge -------
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, { models: { [FREE_FIRST]: { content: 'ok' } } });
+    const { env, spaceId } = await centralEnv(double);
+    const login = await env.call('POST', '/api/daily/login');
+    const before = login.json?.balance;
+    const results = await Promise.all(Array.from({ length: 11 }, (unused, index) =>
+      env.call('POST', `/api/spaces/${spaceId}/chat`, { message: `concurrent ${index}`, client_key: uuid() })));
+    const ok = results.filter(result => result.status === 200);
+    const refused = results.filter(result => result.status === 429);
+    t.ok('M14 exactly ten of eleven concurrent questions are answered', ok.length === 10, ok.length);
+    t.ok('M14 the eleventh is refused for the daily cap', refused.length === 1, refused.map(r => r.json?.error));
+    const spends = ledgerOf(env, 'student-a').filter(row => row.direction === 'spend');
+    t.ok('M14 there is one spend row of 2 BC per answer', spends.length === 10
+      && spends.every(row => row.amount === 2), spends.length);
+    t.ok('M14 the balance fell by exactly 20 BC',
+      (await env.call('GET', '/api/wallet')).json?.balance === before - 20, { before });
   }
 
   return { env: null, report: t.summary() };

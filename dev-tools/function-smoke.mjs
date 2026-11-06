@@ -200,6 +200,7 @@ export async function boot(options = {}) {
       response = await handle({ request, requestId: 'req-local', url: request.url });
     } catch (error) {
       const status = Number.isInteger(error?.status) ? error.status : 500;
+      if (process.env.SB_DEBUG) console.error('[sb-debug]', error?.stack || error);
       response = Response.json({ error: error?.code || 'internal_error', hint: error?.hint || null }, { status });
     }
     let json = null;

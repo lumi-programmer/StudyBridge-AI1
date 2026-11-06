@@ -23,6 +23,25 @@ const TOC_PROMPT = 'This is a textbook table of contents. Return ONLY a JSON arr
 const PAGE_PROMPT = 'Transcribe the printed text of this textbook page exactly. Return ONLY JSON: {"text":"...","confidence":0-100,"equations":["..."],"figures":["short captions"]}. Keep headings, symbols and units. Do not answer, summarise or correct the book.';
 
 export function createLibrary({ add, db, fail, rows, storage, ai, rewards, verifyUploadedObject }) {
+  // Scanner stages are core learning tools and cost 0 Bridge Credits. They are
+  // still written to the request log, so an administrator can see what ran and
+  // what failed without a student ever being charged for scanning.
+  async function freeModelCall(user, feature, run) {
+    const reservation = await rewards.reserveAi(user.id, { feature, requestKey: '', credits: 0, label: feature });
+    try {
+      const result = await run();
+      await rewards.settleAi(user.id, reservation.key, {
+        providerKey: result?.result?.provider?.provider_key || '',
+        modelId: result?.result?.model?.model_id || '',
+        statusCode: 200,
+        detail: feature,
+      });
+      return result;
+    } catch (error) {
+      await rewards.refundAi(user.id, reservation.key, { reason: error?.code || 'failed', feature });
+      throw error;
+    }
+  }
   const bookColumns = 'id,title,author,subject,publisher,edition,publication_year,cover_object_path,external_url,source,verified,chapters_ready,created_at,updated_at';
   const docColumns = 'id,book_id,space_id,file_name,kind,mime,size,stage,status,extraction,created_at,updated_at';
   // Storage paths stay server-side; only this query needs them.
@@ -336,11 +355,11 @@ export function createLibrary({ add, db, fail, rows, storage, ai, rewards, verif
     const document = await ownedDoc(user, input.document_id);
     const bytes = await objectBytes(document);
     const image = await dataUrl(document, bytes);
-    const result = await ai.modelOutputToJson(user.id, {
+    const result = await freeModelCall(user, 'scan_cover', () => ai.modelOutputToJson(user.id, {
       prompt: COVER_PROMPT,
       system: 'You read text from photographs of book covers. Only report visible evidence.',
       purpose: 'scan_cover', needVision: true, images: [image], spaceId: document.space_id,
-    });
+    }));
     const fields = result.json && typeof result.json === 'object' ? result.json : {};
     const guessed = fields.title || fields.author;
     let lookup = null;
@@ -379,11 +398,11 @@ export function createLibrary({ add, db, fail, rows, storage, ai, rewards, verif
           origin = 'pdf_text_layer';
           exact = true;
         } else {
-          const result = await ai.modelOutputToJson(user.id, {
+          const result = await freeModelCall(user, 'scan_toc', () => ai.modelOutputToJson(user.id, {
             prompt: `${TOC_PROMPT}\n\nContents page text:\n${text}`,
             system: 'You index textbook tables of contents exactly as printed.',
             purpose: 'scan_toc', spaceId: document.space_id,
-          });
+          }));
           chapters = Array.isArray(result.json) ? result.json : result.json?.chapters;
           origin = 'pdf_text_model';
         }
@@ -391,10 +410,10 @@ export function createLibrary({ add, db, fail, rows, storage, ai, rewards, verif
     }
     if (!chapters) {
       const image = await dataUrl(document, bytes);
-      const result = await ai.modelOutputToJson(user.id, {
+      const result = await freeModelCall(user, 'scan_toc', () => ai.modelOutputToJson(user.id, {
         prompt: TOC_PROMPT, system: 'You read printed tables of contents from photographs.',
         purpose: 'scan_toc', needVision: true, images: [image], spaceId: document.space_id,
-      });
+      }));
       chapters = Array.isArray(result.json) ? result.json : result.json?.chapters;
       origin = 'vision';
     }
@@ -438,10 +457,10 @@ export function createLibrary({ add, db, fail, rows, storage, ai, rewards, verif
     }
     if (!pages.length) {
       const image = await dataUrl(document, bytes);
-      const result = await ai.modelOutputToJson(user.id, {
+      const result = await freeModelCall(user, 'scan_pages', () => ai.modelOutputToJson(user.id, {
         prompt: PAGE_PROMPT, system: 'You transcribe textbook pages exactly. Never interpret or answer.',
         purpose: 'scan_pages', needVision: true, images: [image], spaceId: document.space_id,
-      });
+      }));
       const text = result.json?.text || (typeof result.json === 'string' ? result.json : '');
       if (!text) fail('extraction_failed', 502, 'No readable text came back from that page.');
       pages = [{ page_number: pageStart, text: String(text).slice(0, 20000), confidence: clamp(Number(result.json?.confidence) || 80, 0, 100) }];

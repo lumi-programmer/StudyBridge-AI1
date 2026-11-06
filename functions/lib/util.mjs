@@ -113,9 +113,67 @@ function walkable(v, depth) {
 
 export function nowIso() { return new Date().toISOString(); }
 
-// Calendar day in UTC so rewards, streaks and daily questions flip at one
-// predictable instant for every student.
-export function dayOf(date = new Date()) { return date.toISOString().slice(0, 10); }
+// Every calendar day in StudyBridge is a Pakistan calendar day. Timestamps are
+// stored in UTC, but the day a reward belongs to, the day a streak counts and
+// the day a student gets their free questions are all decided in Asia/Karachi,
+// so the reset happens at the same instant for everyone.
+export const TIME_ZONE = 'Asia/Karachi';
+const PAKISTAN_OFFSET_MINUTES = 300; // UTC+5, no daylight saving.
+
+const partsFormatter = typeof Intl !== 'undefined' && Intl.DateTimeFormat
+  ? new Intl.DateTimeFormat('en-CA', {
+    timeZone: TIME_ZONE, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  })
+  : null;
+
+// The wall-clock fields of an instant in Pakistan time.
+export function zonedParts(date = new Date()) {
+  const moment = date instanceof Date ? date : new Date(date);
+  if (partsFormatter) {
+    const parts = {};
+    for (const part of partsFormatter.formatToParts(moment)) {
+      if (part.type !== 'literal') parts[part.type] = part.value;
+    }
+    const year = Number(parts.year);
+    const month = Number(parts.month);
+    const day = Number(parts.day);
+    // en-CA renders midnight as 24 in some runtimes; that is the same instant.
+    const hour = Number(parts.hour) % 24;
+    const minute = Number(parts.minute);
+    if (Number.isFinite(year) && Number.isFinite(month) && Number.isFinite(day)) {
+      return { year, month, day, hour, minute, offsetMinutes: PAKISTAN_OFFSET_MINUTES };
+    }
+  }
+  const shifted = new Date(moment.getTime() + PAKISTAN_OFFSET_MINUTES * 60000);
+  return {
+    year: shifted.getUTCFullYear(), month: shifted.getUTCMonth() + 1, day: shifted.getUTCDate(),
+    hour: shifted.getUTCHours(), minute: shifted.getUTCMinutes(), offsetMinutes: PAKISTAN_OFFSET_MINUTES,
+  };
+}
+
+// Calendar day in Asia/Karachi.
+export function dayOf(date = new Date()) {
+  const parts = zonedParts(date);
+  return `${parts.year}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}`;
+}
+
+// The Pakistan calendar day a stored UTC timestamp belongs to.
+export function dayOfIso(iso) {
+  const parsed = Date.parse(String(iso || ''));
+  if (!Number.isFinite(parsed)) return null;
+  return dayOf(new Date(parsed));
+}
+
+// The next midnight in Asia/Karachi, as a UTC instant. This is the moment the
+// daily counter and the daily login reward become available again.
+export function nextResetIso(date = new Date()) {
+  const parts = zonedParts(date);
+  // Start from midnight of the current Pakistan day, then step to the next day.
+  const startUtc = Date.UTC(parts.year, parts.month - 1, parts.day, 0, 0) - parts.offsetMinutes * 60000;
+  const next = startUtc + 86400000;
+  return new Date(next).toISOString();
+}
 
 export function addDays(day, delta) {
   const d = new Date(`${day}T00:00:00Z`);
