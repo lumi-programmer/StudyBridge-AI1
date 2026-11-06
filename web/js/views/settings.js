@@ -141,7 +141,7 @@ async function loadProviders(host, navigate, reloadProviders) {
   let settings;
   try { settings = await api.get('/api/ai/settings'); } catch (error) { host.replaceChildren(errorCard(error, () => loadProviders(host, navigate, reloadProviders))); return; }
   host.appendChild(centralAiCard(settings.central, settings.daily_ai));
-  host.appendChild(trialCard(settings.trial));
+  host.appendChild(trialCard(settings.trial, settings.central));
   host.appendChild(byokCard(settings, reloadProviders));
   for (const provider of settings.providers) host.appendChild(providerCard(provider, reloadProviders));
   host.appendChild(routerCard(settings));
@@ -521,6 +521,7 @@ function routerCard(settings) {
       h('div', { class: 'stat' }, h('span', { class: 'stat-label', text: 'Enabled providers' }), h('b', { text: num(r.providers) })),
       h('div', { class: 'stat' }, h('span', { class: 'stat-label', text: 'Enabled models' }), h('b', { text: num(r.enabled_models) })),
       h('div', { class: 'stat' }, h('span', { class: 'stat-label', text: 'Vision models' }), h('b', { text: num(r.vision_models) }))),
+    h('p', { class: 'tiny muted', text: 'These counts are the whole pool the router may use: StudyBridge Free AI — the provider StudyBridge manages for everyone — plus any provider you connected with a key of your own.' }),
     h('p', { class: 'tiny muted', text: 'Order: cheapest capable model first, then fallbacks on failure. Choose a specific model in the tutor to override it. Two enabled models unlock the 10 BC advanced comparison.' }),
     h('p', { class: 'tiny muted', text: `Temporary failures are retried up to ${num(p.retry_attempts || 0)} times with an exponential backoff of ${secs(p.retry_base_ms)} to ${secs(p.retry_max_ms)}, a ${secs(p.retry_budget_ms)} total wait budget and the provider’s Retry-After honoured up to ${secs(p.retry_after_cap_ms)}. No retry is ever sent faster than ${secs(p.min_retry_pause_ms)} after the last one, whatever the Secrets say. A model that keeps failing is skipped for ${secs(p.cooldown_ms)} (doubling up to ${secs(p.cooldown_max_ms)}) and returns on its own; a provider whose allowance is spent is asked once and parked, never re-tried into the same answer. Each call is cut off after ${secs(p.timeout_ms)}. Every one of these is a Site Secret, so an operator can widen them during a provider outage.` }),
     h('p', { class: 'tiny muted', text: `A 429 is read as one of two things: a short window (requests per minute or concurrent requests) or a spent allowance (daily free tokens). They need the opposite handling — the first is retried with a wait, the second is not retried at all. “Check account limits” on a provider card reads the provider’s own usage endpoint with your stored key, at most once every ${secs(p.usage_check_cooldown_ms)}, and the key itself never comes back to this page.` }),
@@ -542,9 +543,14 @@ function usageCard(settings) {
 }
 
 // ---------- free trial ----------
-function trialCard(trial) {
+function trialCard(trial, central) {
   const t = trial || {};
+  const c = central || {};
   const on = t.configured === true;
+  // The Free Trial and StudyBridge Free AI are two different things: the trial
+  // is off, but the platform's own free models may still be answering. Saying
+  // "you need your own key" while they answer would be false.
+  const centralOn = c.configured === true && c.available === true;
   const state = h('span', { class: `tag ${on ? 'green' : 'grey'}`, text: on ? 'Available now' : 'Not switched on yet' });
   const meter = on ? h('div', { class: 'grid cols-3' },
     h('div', { class: 'stat teal' }, h('span', { class: 'stat-label', text: 'Left today' }),
@@ -564,11 +570,15 @@ function trialCard(trial) {
     h('div', { class: 'card-head' }, h('h3', { text: 'Free Trial Provider' }), h('span', { class: 'spacer' }), state),
     h('p', { class: 'tiny muted', text: on
       ? 'A small number of AI answers a day, paid for by SchoolPlanner.pk so you can try the tutor before spending anything. It is used only while you have no provider of your own, and it stops when the cap is reached — it is not unlimited.'
-      : 'This site has not finished switching on the platform Free Trial, so AI needs your own provider key for now. Everything else in StudyBridge works without any key.' }),
+      : centralOn
+        ? 'The platform Free Trial is not switched on, but StudyBridge Free AI is answering, so you need no key of your own. Everything else in StudyBridge works without any key either.'
+        : 'This site has not finished switching on the platform Free Trial, so AI needs your own provider key for now. Everything else in StudyBridge works without any key.' }),
     meter,
     on ? null : h('details', { class: 'card card-flat' }, h('summary', { class: 'tiny', text: 'Why is it unavailable?' }),
       h('p', { class: 'tiny muted', text: t.reason || 'The platform Free Trial Secrets are not configured on this deployment.' }),
-      h('p', { class: 'tiny muted', text: 'This is the operator’s setup, not yours — a student cannot fix it. Connecting your own key is the path that works today.' })),
+      h('p', { class: 'tiny muted', text: centralOn
+        ? 'This is the operator’s setup, not yours — a student cannot fix it. It does not stop you: StudyBridge Free AI answers in the meantime, and a key of your own is optional.'
+        : 'This is the operator’s setup, not yours — a student cannot fix it. Connecting your own key is the path that works today.' })),
     h('div', { class: 'divider' }), h('h4', { class: 'stat-label', text: 'How to get more AI' }), unlock);
 }
 
@@ -602,11 +612,14 @@ function dataCard() {
 
 // ---------- about ----------
 function aboutCard(boot) {
+  const central = boot.free_models?.central || {};
   const aiLine = boot.providers?.count
     ? `AI answers come from the provider you connected${boot.providers.default ? ` (${boot.providers.default.api_name})` : ''}. The platform takes no cut of that spend.`
-    : boot.trial?.configured
-      ? `AI answers come from the platform Free Trial while it lasts — ${boot.trial.remaining_today} of ${boot.trial.daily_limit} left today, ${boot.trial.remaining_total} left on this account. Your own key in Settings removes that cap.`
-      : 'No AI model is connected, so the AI screens stop with a clear message instead of inventing an answer. Add your own key in Settings, or ask whoever runs this site to switch on the platform Free Trial.';
+    : central.configured === true
+      ? `AI answers come from StudyBridge Free AI — ${num(central.free_models)} free model${central.free_models === 1 ? '' : 's'} verified at $0 on ${central.name || 'the provider'}’s own list, and you need no key of your own.`
+      : boot.trial?.configured
+        ? `AI answers come from the platform Free Trial while it lasts — ${boot.trial.remaining_today} of ${boot.trial.daily_limit} left today, ${boot.trial.remaining_total} left on this account. Your own key in Settings removes that cap.`
+        : 'No AI model is connected, so the AI screens stop with a clear message instead of inventing an answer. Add your own key in Settings, or ask whoever runs this site to switch on the platform Free Trial.';
   return h('section', { class: 'card stack' },
     h('div', { class: 'card-head' }, h('h3', { text: 'About StudyBridge AI' })),
     h('p', { class: 'tiny', text: 'A study platform for students who cannot pay for an AI subscription: scan a textbook, keep notes per subject, ask questions answered from your own pages, practise under timed conditions, and see the work add up.' }),

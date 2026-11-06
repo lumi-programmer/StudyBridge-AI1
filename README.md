@@ -181,12 +181,17 @@ hosting plan backing this workspace reports `sites_quota_exceeded` for backend s
 would be a prototype, not the product. Details and the resume steps are in
 [DEPLOYMENT.md](DEPLOYMENT.md).
 
-**No live AI generation has been performed.** The central provider is fully
+**Live AI generation has been performed locally.** The central provider is fully
 implemented and every path in it is exercised by the test suite against a
-provider double, but this workspace has no `OPENROUTER_API_KEY`, so no request
-has ever reached OpenRouter and no real answer has been produced. The integration
-is complete and ready; it needs one Secret and one live question to confirm
-end-to-end. See [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md).
+provider double, and it has now also answered a real question through the local
+preview: `OPENROUTER_API_KEY` is read from the repo-root `.env`, the catalogue is
+read from `https://openrouter.ai/api/v1/models` (417 models published, 14 verified at
+exactly $0 plus the `openrouter/free` router), and a real answer came back from
+`cohere/north-mini-code:free` for exactly 2 BC with one spend row in the ledger. The
+key stays on the server: it is stored as AES-GCM ciphertext, only its last four
+characters are ever readable, and a sweep of every browser-facing response found the
+plaintext in none of them. The deployed site still needs the same value as a Site
+Secret. See [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md).
 
 ## Security in one paragraph
 

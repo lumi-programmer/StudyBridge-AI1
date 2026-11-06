@@ -327,6 +327,14 @@ read and says **"no generation was attempted and no answer is claimed"**; with a
 runs one real question through the router, the adapter and the ledger, and prints the
 reply, the model that answered, the tokens and the credits charged.
 
+`./dev-tools/node.sh dev-tools/central-browser-path-check.mjs` is the same check made
+against a **running** preview rather than an in-process one. It talks to the port the
+browser is already using (`PREVIEW_BASE`, `127.0.0.1:4317` by default), asks one question
+through the tutor route the UI calls, and then reads every browser-facing response it
+touched and reports how many of them contain the plaintext key — which must be zero. The
+key is read from `.env` and never printed. Use it after pasting a key into `.env` to prove
+two things at once: the browser path answers, and the key does not travel to the client.
+
 `./dev-tools/node.sh dev-tools/gemini-config-audit.mjs` audits the whole saved Gemini
 configuration end to end: it saves a provider exactly as the Setup screen records it
 (API Name `Google Gemini`, Provider ID `google-gemini`, Base URL

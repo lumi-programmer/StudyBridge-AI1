@@ -3,6 +3,75 @@
 Dates follow the work sessions that produced each change; the project folder was created
 2026-10-31 and the latest session is 2026-11-06.
 
+## 2026-11-06 — The key was in the `.env`; the server was started before it
+
+The brief was that StudyBridge Free AI still read **"not connected yet"** with 0 enabled
+providers and 0 enabled models after `OPENROUTER_API_KEY` was added to the repo-root
+`.env`. The key was there, the code was right, and the connection still would not come
+up. Two separate causes, one of them a report that was simply wrong.
+
+### Fixed — a running server cannot see a `.env` that changed under it
+
+- **`dev-tools/serve.mjs` reads `.env` once, at startup.** `loadDotEnv()` runs when the
+  process starts and nothing re-reads the file. The preview server had been started at
+  20:48; the key was written into `.env` at 21:01. So `env('OPENROUTER_API_KEY')` was
+  empty for the life of that process, `centralConfig().configured` was `false`, and
+  `centralState()` answered `last_status: 'not_configured'` — *"The platform AI key has
+  not been set on the server yet."* The key was in the file; the process was older than
+  the file.
+- **The remedy is a restart, not a code change.** `OPENROUTER_API_KEY` is a server
+  Secret; the deployed Function reads Site Secrets and never a file, so a `.env` that
+  changes cannot and should not be picked up by a running process. After the restart the
+  same process reports `configured: true`, `available: true`, `free_models: 14`,
+  `approved_models: 15`, `last_status: 'ok'`.
+
+### Fixed — the router card counted only the student's own providers
+
+- **"0 enabled providers, 0 enabled models" was about BYOK, not about the connection.**
+  `/api/ai/settings` counted the `providers` and `models` tables, which hold the keys a
+  student connected themselves. The centrally managed provider lives in `ai_providers` /
+  `ai_models`, so a student using StudyBridge Free AI has none of the former — and the
+  card printed 0/0 while the router was about to answer from the platform's models.
+  The router's pool is both, so the card now counts both: 1 provider, 15 models, 9 of
+  them vision-capable. Only counts leave the route — no key, no cipher, no model row.
+- **The card no longer claims photo scans are blocked** when a verified free vision
+  model is available, and it says what the numbers include.
+- **Two sentences that had become false.** The About panel said *"No AI model is
+  connected"* while the platform was answering; the Free Trial card said *"AI needs your
+  own provider key for now"* while StudyBridge Free AI was answering. Both now read the
+  central state and say what is actually true. The Free Trial itself is a separate,
+  still-unconfigured feature (`FREE_TRIAL_*` Secrets) and still says so.
+
+### Verified — against the live provider, from the running preview
+
+| | |
+| --- | --- |
+| Catalogue | HTTP 200 from `https://openrouter.ai/api/v1/models`; **417 models** published and recorded, 416 priced from the provider's own numbers |
+| Published at exactly $0 | **14**, plus the `openrouter/free` router = 15 selectable |
+| Provider row | `openrouter-central`, enabled, `free_only: true`, `last_status: ok` |
+| Key at rest | AES-GCM ciphertext; the plaintext was checked against the ciphertext and is **not** in it; only `key_hint` (last four) is readable |
+| A real question | answered by `cohere/north-mini-code:free`, 357 tokens, **exactly 2 BC**, one spend row, balance 50 → 48 |
+| Browser sweep | 5 browser-facing responses checked, **0** contained the plaintext key |
+| Suite | `SUITE: 633/633 passed` |
+
+### Added — `dev-tools/central-browser-path-check.mjs`
+
+- The live check above was run twice: once against an in-process boot of the app's own
+  routes, and once against the **running preview** the browser is actually pointed at.
+  The second script (`dev-tools/central-browser-path-check.mjs`, `PREVIEW_BASE` to choose
+  the port) asks one question through the tutor route the UI calls, then reads every
+  browser-facing response it touched and counts how many contain the plaintext key — the
+  count must be zero. The key is read from `.env` and is never printed, so the script
+  can be run against a real key without putting it in the transcript.
+- What it measured on 2026-11-06: `configured: true`, `available: true`, `key_hint`
+  last four only, 14 verified free models, one real answer from
+  `cohere/north-mini-code:free` for exactly 2 BC with the balance falling 40 → 38 → 36
+  and `spent` accumulating to 4, the daily allowance counting 3 of 10 used, and **0** of
+  5 browser-facing responses containing the plaintext key.
+- One honest note on the local numbers: the preview's data is an in-memory fake, so it
+  resets whenever the preview restarts. A balance that jumps back to its seeded value is
+  the fake being re-seeded, not a lost transaction.
+
 ## 2026-11-06 — The catalogue read, verified against the live provider
 
 The brief was to connect the central OpenRouter provider and test the app locally. The

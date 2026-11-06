@@ -31,16 +31,18 @@ Written so nobody has to guess what is real. "Unverified" is not "working".
    Everything else — request shapes, headers, the six failure classes, token accounting and
    ledger writes — is covered by the harness's mocked fetch, which asserts the exact body
    and URL rather than trusting the transport.
-4. **StudyBridge Free AI has never made a real request.** The central provider
+4. **StudyBridge Free AI has now made a real request.** The central provider
    (`openrouter-central`, OpenRouter, `openrouter/free`) is fully implemented and every
    part of it is exercised — provisioning from the environment, the catalogue read, the
    zero-price gate, the free-only routing, the refund, the daily cap, the key's absence
-   from every response — but **this workspace holds no `OPENROUTER_API_KEY`**, so no
-   request has ever left the machine and no real answer has been produced. The integration
-   is complete and ready; it needs one Secret and one live question. Until then the
-   product says "StudyBridge Free AI is not connected on this server yet" and names the
-   missing Secret rather than showing a fabricated answer. This is the single outstanding
-   item on the Phase 2 acceptance list, and it is stated here rather than glossed over.
+   from every response — and on 2026-11-06 it was verified against the live provider
+   from the local preview: 417 models published and recorded, 14 published at exactly $0
+   plus the router, and a real answer returned by `cohere/north-mini-code:free` for
+   exactly 2 BC with one spend row in the ledger. The key is stored as AES-GCM
+   ciphertext, only its last four characters are readable, and a sweep of every
+   browser-facing response found the plaintext in none of them. What remains outstanding
+   is the **deployed** site: it has no backend yet (`sites_quota_exceeded`), so the same
+   Secret still has to be set there and the same question asked again against it.
 5. **The Free Trial is unproven against a live model.** Its configuration, limits,
    metering, refusal modes and key secrecy are covered by 24 checks with a mock upstream.
    Turning it on needs operator Site Secrets; until then Settings honestly says "Not
@@ -238,8 +240,9 @@ Written so nobody has to guess what is real. "Unverified" is not "working".
     `~` (OpenRouter's rolling aliases such as `~openai/gpt-latest`); they are listed and
     priced now, and being paid models they stay disabled.
 
-    What is **not** on record is a live **answer**: this workspace holds no OpenRouter
-    key, so no generation was attempted and none is claimed.
+    A live **answer** is now on record: on 2026-11-06 the local preview read the
+    catalogue from the real endpoint and `cohere/north-mini-code:free` — a model verified
+    at exactly $0 — answered a real question for exactly 2 BC.
     `dev-tools/central-live-check.mjs` performs the catalogue read without a key and says
     so plainly; with `OPENROUTER_API_KEY` set it runs one real question through the app's
     own router and prints the reply, the model that answered and the credits charged.
@@ -282,12 +285,14 @@ Written so nobody has to guess what is real. "Unverified" is not "working".
 
 ## StudyBridge Free AI
 
-39. **The central provider has never answered a real question.** This is the honest
-    headline of the Phase 2 work. The provider, the zero-price gate, the free-only
-    routing, the daily cap, the midnight reset, the refund and the key's absence from
-    every response are all implemented and all exercised — but the suite drives them
-    against a provider double, and this workspace holds no `OPENROUTER_API_KEY`, so no
-    request has ever left the machine. Nothing here claims a live generation succeeded.
+39. **The central provider has answered a real question — from the local preview, not from
+    the deployed site.** The provider, the zero-price gate, the free-only routing, the
+    daily cap, the midnight reset, the refund and the key's absence from every response
+    are all implemented and all exercised. On 2026-11-06 the local preview sent a real
+    request to `https://openrouter.ai/api/v1` and got a real answer back from
+    `cohere/north-mini-code:free`, a model verified at exactly $0, for exactly 2 BC. The
+    deployed site still has no backend (`sites_quota_exceeded`), so it has no Secret, no
+    request and no answer of its own yet.
 40. **Free models on OpenRouter are a moving target.** The catalogue is re-read daily
     (and sooner after a failed check) precisely because a model's price can change
     between one day and the next. A model that was free yesterday and is priced today

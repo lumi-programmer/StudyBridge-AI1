@@ -280,6 +280,21 @@ export function createProviders({ add, ai, db, fail, rows }) {
     // The centrally managed AI. The key stays on the server; the student sees
     // only whether it is connected and how many free models are verified.
     const central = scoped.gateway ? await scoped.gateway.centralState().catch(() => null) : null;
+    // The router's pool is the student's own providers plus the platform's
+    // centrally managed one. Counting only the student's own would print
+    // "0 providers" on a page whose router is about to answer from the
+    // platform's free models, so the platform's own rows are counted too.
+    // Only counts leave this handler: no key, no cipher, no model row.
+    const platform = central?.configured && scoped.gateway
+      ? await scoped.gateway.availability().catch(() => null)
+      : null;
+    const platformVision = central?.configured && scoped.gateway
+      ? await scoped.gateway.availability({ needVision: true }).catch(() => null)
+      : null;
+    const platformProviders = Number(platform?.providers) || 0;
+    const platformModels = Number(central?.approved_models) || 0;
+    const platformVisionModels = Number(platformVision?.selectable_now) || 0;
+    const platformCooling = Number(platform?.cooling) || 0;
     return Response.json({
       trial: { ...trial, byok_connected: providers.some(provider => provider.enabled) },
       central: central ? {
@@ -301,14 +316,14 @@ export function createProviders({ add, ai, db, fail, rows }) {
         models: provider.models || [],
       })),
       router: {
-        providers: providers.filter(p => p.enabled).length,
-        enabled_models: enabledModels,
-        vision_models: visionModels,
-        cooling_models: coolingModels,
-        cooling_note: coolingModels
-          ? `${coolingModels} model(s) are on a short automatic cooldown after a temporary provider error. They stay enabled and go back into rotation by themselves — no setting was changed.`
+        providers: providers.filter(p => p.enabled).length + platformProviders,
+        enabled_models: enabledModels + platformModels,
+        vision_models: visionModels + platformVisionModels,
+        cooling_models: coolingModels + platformCooling,
+        cooling_note: (coolingModels + platformCooling)
+          ? `${coolingModels + platformCooling} model(s) are on a short automatic cooldown after a temporary provider error. They stay enabled and go back into rotation by themselves — no setting was changed.`
           : null,
-        needs_vision_note: visionModels === 0
+        needs_vision_note: (visionModels + platformVisionModels) === 0
           ? 'No enabled model is marked as vision-capable, so photo scans cannot be transcribed yet. Use PDF text layers or enable a vision model.'
           : null,
       },

@@ -12,10 +12,10 @@ storage. There is no build step and no dependency install.
 | Cloud project and site record | created (see identities below) |
 | Backend capabilities (database + functions + storage) | **blocked** — `sites_quota_exceeded` on `backend_sites`, used 0 / limit 0 |
 | Schema migration | not applied (needs the backend) |
-| Site Secrets | `CREDENTIAL_KEY`, `ADMIN_OWNER_IDS` and `OPENROUTER_API_KEY` still to be set |
+| Site Secrets | `CREDENTIAL_KEY`, `ADMIN_OWNER_IDS` and `OPENROUTER_API_KEY` are set in the repo-root `.env` for the local preview; all three still have to be set as Site Secrets on the deployed site |
 | Draft preparation | not run |
 | Publication | not run |
-| Live AI generation | **not performed** — no `OPENROUTER_API_KEY` exists in this workspace, so no request has ever reached OpenRouter |
+| Live AI generation | **performed locally** — the local preview read the real catalogue (417 models published, 14 verified at exactly $0 plus the router) and `cohere/north-mini-code:free` answered a real question for exactly 2 BC. The deployed site has still never been reached: it has no backend yet |
 
 The site is **not live**. This is deliberate: a static upload without its Function,
 database and storage would be a clickable shell that fakes the product, and the brief
@@ -142,8 +142,9 @@ config file.
    stored row, literal URL, redacted headers, sanitized body, paged discovery, answer).
    A real provider answer needs the student's own key and nothing else changes:
    `GEMINI_API_KEY=<key> ./dev-tools/node.sh dev-tools/gemini-live-check.mjs`.
-   The one live check still outstanding for the central provider is a real question
-   through `OPENROUTER_API_KEY` — see the note at the end of this file.
+   The central provider's live check has been performed locally on 2026-11-06 (a real
+   answer from `cohere/north-mini-code:free` for exactly 2 BC). The **deployed** site owes
+   the same check against its own Secret — see the note at the end of this file.
 2. `ensure_backend` with the three capabilities; wait for the operation to settle.
 3. Apply `schema/studybridge.sql` and then `schema/central-gateway.sql` as migrations,
    and read them back to confirm the tables.
@@ -207,14 +208,15 @@ The published origin, not a preview:
 - [ ] With every approved free model unavailable: `503 free_models_unavailable`, the
       balance unchanged, and the response contains no invented answer.
 
-## The central provider — the live check still outstanding
+## The central provider — the live check, done locally and still owed by the deployed site
 
-With `OPENROUTER_API_KEY` set, the whole product runs without a student key. The
-**catalogue half** of this check has been performed against the live provider — see
-"Verified against the live provider" in `CHANGELOG.md`: 453 models published, 453
-recorded, 14 published at exactly $0 plus the router. The **answer** half has not,
-because the workspace holds no such key. It is the first thing to run once the backend
-is provisioned:
+With `OPENROUTER_API_KEY` set, the whole product runs without a student key. Both
+halves of this check have been performed against the live provider from the **local
+preview** on 2026-11-06 — see "Verified against the live provider" in `CHANGELOG.md`:
+417 models published and recorded, 14 published at exactly $0 plus the router, and a
+real answer from `cohere/north-mini-code:free` for exactly 2 BC with one spend row. The
+**deployed site** has no backend yet, so it still owes the same check, against its own
+Secret, once one exists:
 
 1. Set `OPENROUTER_API_KEY` as a Site Secret.
 2. `GET /api/bootstrap` → `free_models.central.configured` is `true` and
