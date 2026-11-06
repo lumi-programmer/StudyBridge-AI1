@@ -3,6 +3,73 @@
 Dates follow the work sessions that produced each change; the project folder was created
 2026-10-31 and the latest session is 2026-11-06.
 
+## 2026-11-06 — The catalogue read, verified against the live provider
+
+The brief was to connect the central OpenRouter provider and test the app locally. The
+first attempt exposed a defect that had been hiding behind a green suite: **the live
+catalogue was never actually being read.**
+
+### Fixed — a catalogue that was cut in half still reported success
+
+- **The reader's limit was below the real catalogue.** `fetchCatalogue()` read the
+  provider's `/models` body with a 600 KB ceiling. OpenRouter publishes one page of
+  453 models — **813 KB**. `readBody()` returns `''` when the limit is passed, so the
+  body parsed to `null`, **zero** models were read, and `verifyPricing()` still set
+  `last_status: 'ok'` and returned `checked: 0`. The admin screen showed a successful
+  price check over an empty catalogue.
+- **The reader now says when it was cut short.** `readBodyResult(response, limit)`
+  returns `{ text, truncated }`; `readBody()` is expressed on top of it and keeps its
+  old empty-string-on-overflow behaviour for every other caller. The catalogue limit
+  is 8 MB — far above anything a provider publishes.
+- **An unreadable catalogue is a failure, not an empty list.** A body that runs past
+  the limit, is not JSON, or is not a list of models now fails with the new code
+  `catalogue_unreadable` (502), registered in `SAFE_CODES` and given a plain-language
+  message. A cut-short read can no longer be reported as a successful check.
+- **A model is only marked unavailable when the whole catalogue was read.** The sweep
+  that disables models the provider no longer publishes is skipped when the read was
+  cut short, so a partial read cannot disable a model that is still published.
+- **Nineteen published models are no longer thrown away.** OpenRouter's rolling
+  aliases (`~openai/gpt-latest`, `~anthropic/claude-opus-latest`) begin with `~`, which
+  the model-id rule rejected. `~` is an unreserved URL character and cannot form a path
+  segment, so the rule now accepts it; the aliases are listed and priced, and being
+  paid models they stay disabled. The model-id hint text was updated to match.
+
+### Verified — against the live provider
+
+`dev-tools/central-live-check.mjs` boots the app's own routes and asks
+`GET /api/ai/settings`, which is what makes the central provider provision itself.
+Against the real `https://openrouter.ai/api/v1/models`:
+
+| | |
+| --- | --- |
+| HTTP | 200, one page, no pagination token |
+| Size | 813,109 bytes |
+| Models published | 453 |
+| Models the gateway recorded | 453 — every one |
+| Priced from the provider's own numbers | 452 |
+| Published at exactly $0 | 14, plus the `openrouter/free` router |
+| Models enabled | only the free ones and the router |
+
+The key is stored encrypted (AES-GCM, 96 characters) and the ciphertext does not
+contain the plaintext.
+
+### Added — regression cases and the local check
+
+- **Section M, cases M15–M18.** A catalogue larger than the old 600 KB ceiling is read
+  whole; an unreadable catalogue fails with `catalogue_unreadable` and disables
+  nothing that was verified earlier; a body cut short by the limit is reported as
+  truncated rather than silently dropped; a published id that begins with `~` is
+  recorded and priced.
+- **`dev-tools/central-live-check.mjs`.** The live check described above. With no
+  `OPENROUTER_API_KEY` it stops after the catalogue read and prints *"no generation
+  was attempted and no answer is claimed"*; with a key it asks one real question
+  through the router, the adapter and the ledger, and prints the reply, the model
+  that answered, the tokens and the credits charged.
+
+### Tests
+
+`SUITE: 633/633 passed` — 619 before, plus the 14 new checks.
+
 ## 2026-11-06 — Phase 2: the central AI system, free models, Bridge Credits and the daily reset
 
 The brief was a second attachment: one centrally managed server-side provider

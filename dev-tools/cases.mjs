@@ -3,6 +3,7 @@
 // "name :: detail" failures; an empty list means every check passed.
 import { boot, userContext } from './function-smoke.mjs';
 import { dayOfIso } from '../functions/lib/util.mjs';
+import { readBody, readBodyResult } from '../functions/lib/ai.mjs';
 
 const KEY = 'sk-tes…et-9';
 
@@ -2411,6 +2412,23 @@ const SINGLE_FREE_CATALOGUE = {
   ],
 };
 
+// A catalogue the size a real provider publishes. OpenRouter's own list is a
+// single page of roughly 800 KB; the reader used to cut it at 600 KB, parse
+// nothing at all, and still report a successful check over an empty list.
+function largeCatalogue() {
+  const data = [...FREE_CATALOGUE.data];
+  for (let index = 0; index < 120; index += 1) {
+    data.push({
+      id: `vendor/padded-model-${String(index).padStart(3, '0')}`,
+      name: `Padded Model ${index}`,
+      description: 'x'.repeat(8000),
+      pricing: { prompt: '0.000001', completion: '0.000002' },
+      context_length: 8192,
+    });
+  }
+  return { data };
+}
+
 export async function sectionPhase2() {
   const t = tracker();
 
@@ -2679,6 +2697,85 @@ export async function sectionPhase2() {
       && spends.every(row => row.amount === 2), spends.length);
     t.ok('M14 the balance fell by exactly 20 BC',
       (await env.call('GET', '/api/wallet')).json?.balance === before - 20, { before });
+  }
+
+  // ---- M15: a catalogue the size a real provider publishes is read whole ----
+  {
+    const catalogue = largeCatalogue();
+    const double = gatewayDouble(catalogue, { models: { [FREE_FIRST]: { content: 'ok' } } });
+    const { env } = await centralEnv(double);
+    const shell = await env.call('GET', '/api/bootstrap');
+    const central = shell.json?.free_models?.central;
+    t.ok('M15 a catalogue larger than the old 600 KB ceiling is read whole',
+      central?.last_status === 'ok', central);
+    t.ok('M15 the free models inside a large catalogue are still found',
+      central?.free_models === 2, central);
+    const admin = await env.call('GET', '/api/admin/overview');
+    const recorded = new Set((admin.json?.central?.models || []).map(model => model.model_id));
+    const missing = catalogue.data.filter(entry => !recorded.has(entry.id)).map(entry => entry.id);
+    t.ok('M15 every model the provider published was recorded', missing.length === 0,
+      { missing, recorded: recorded.size, published: catalogue.data.length });
+  }
+
+  // ---- M16: a catalogue that cannot be read is a failure, not an empty list -
+  {
+    const catalogue = { data: [...FREE_CATALOGUE.data] };
+    const double = gatewayDouble(catalogue, { models: { [FREE_FIRST]: { content: 'ok' } } });
+    const { env } = await centralEnv(double);
+    const good = await env.call('GET', '/api/bootstrap');
+    t.ok('M16 the catalogue was verified once', good.json?.free_models?.central?.free_models === 2,
+      good.json?.free_models?.central);
+    const provider = env.db.table('ai_providers')
+      .filter(row => row.provider_key === 'openrouter-central')[0];
+    // The provider answers, but not with a list of models.
+    catalogue.data = 'not-a-model-list';
+    const again = await env.call('POST', `/api/admin/providers/${provider.id}/verify`);
+    t.ok('M16 an unreadable catalogue fails the check', again.status >= 400, again.status);
+    t.ok('M16 the failure is named, not reported as a success',
+      again.json?.error === 'catalogue_unreadable', again.json);
+    const after = await env.call('GET', '/api/admin/overview');
+    const free = (after.json?.central?.models || []).filter(model => model.free_tier === true);
+    t.ok('M16 a failed read disables nothing that was verified earlier',
+      free.length === 2 && free.every(model => model.enabled !== false), after.json?.central?.models);
+  }
+
+  // ---- M17: a body cut short by the limit is reported, not silently dropped -
+  {
+    const cut = await readBodyResult(new Response('x'.repeat(4096)), 1024);
+    t.ok('M17 a body past the limit is reported as truncated', cut.truncated === true, cut);
+    t.ok('M17 a truncated body is not handed back as a short read', cut.text === '', cut.text?.length);
+    const whole = await readBodyResult(new Response('hello'), 1024);
+    t.ok('M17 a body inside the limit is read whole',
+      whole.truncated === false && whole.text === 'hello', whole);
+    t.ok('M17 the plain reader still returns the text',
+      await readBody(new Response('hello'), 1024) === 'hello', null);
+  }
+
+  // ---- M18: a provider id that starts with "~" is kept, not dropped ---------
+  //
+  // OpenRouter publishes its rolling aliases as "~openai/gpt-latest". A rule
+  // that only accepted a leading letter or digit threw nineteen published
+  // models away without saying so.
+  {
+    const alias = '~vendor/rolling-latest';
+    const catalogue = {
+      data: [
+        { id: FREE_FIRST, name: 'Qwen3 235B (Free)', pricing: { prompt: '0', completion: '0' }, context_length: 32768 },
+        { id: alias, name: 'Rolling Latest', pricing: { prompt: '0.000002', completion: '0.000008' }, context_length: 32768 },
+      ],
+    };
+    const double = gatewayDouble(catalogue, { models: { [FREE_FIRST]: { content: 'ok' } } });
+    const { env } = await centralEnv(double);
+    // The central provider provisions itself on the first request that touches
+    // the gateway, so the catalogue is read by this call.
+    const shell = await env.call('GET', '/api/bootstrap');
+    const rows = env.db.table('ai_models').filter(row => row.model_id === alias);
+    t.ok('M18 an id the provider published is recorded even when it starts with ~',
+      rows.length === 1, rows);
+    t.ok('M18 its price was verified from the catalogue', rows[0]?.pricing_verified === true
+      && rows[0]?.free_tier === false && rows[0]?.enabled === false, rows[0]);
+    t.ok('M18 the free models beside it are unaffected',
+      shell.json?.free_models?.central?.free_models === 1, shell.json?.free_models?.central);
   }
 
   return { env: null, report: t.summary() };

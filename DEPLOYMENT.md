@@ -134,7 +134,7 @@ config file.
 ## Publish sequence
 
 1. Validate the source unchanged since the last green run:
-   `js-syntax`, `js-imports`, `css-classes`, `sync-flat.sh`, `_run.mjs` → `SUITE: 619/619 passed`.
+   `js-syntax`, `js-imports`, `css-classes`, `sync-flat.sh`, `_run.mjs` → `SUITE: 633/633 passed`.
    Three probes back the outbound claims: `dev-tools/outbound-probe.mjs` (request counts,
    concurrency and retry gaps over a socket), `dev-tools/gemini-path-probe.mjs` (the
    literal Gemini request line against an endpoint that enforces Google's URL binding) and
@@ -207,11 +207,14 @@ The published origin, not a preview:
 - [ ] With every approved free model unavailable: `503 free_models_unavailable`, the
       balance unchanged, and the response contains no invented answer.
 
-## The central provider — the one live check still outstanding
+## The central provider — the live check still outstanding
 
 With `OPENROUTER_API_KEY` set, the whole product runs without a student key. The
-following has **not** been performed in this workspace, because the workspace holds no
-such key. It is the first thing to run once the backend is provisioned:
+**catalogue half** of this check has been performed against the live provider — see
+"Verified against the live provider" in `CHANGELOG.md`: 453 models published, 453
+recorded, 14 published at exactly $0 plus the router. The **answer** half has not,
+because the workspace holds no such key. It is the first thing to run once the backend
+is provisioned:
 
 1. Set `OPENROUTER_API_KEY` as a Site Secret.
 2. `GET /api/bootstrap` → `free_models.central.configured` is `true` and

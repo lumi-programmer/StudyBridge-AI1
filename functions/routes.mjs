@@ -36,7 +36,7 @@ const SAFE_CODES = new Set([
   'provider_request_failed', 'database_unavailable', 'endpoint_unreachable', 'internal_error',
   'trial_daily_limit', 'trial_total_limit', 'trial_unavailable', 'no_vision_model',
   'admin_required', 'forbidden', 'free_models_unavailable', 'unverified_model', 'pricing_not_verified',
-  'shared_quota_exhausted', 'invalid_ai_response',
+  'shared_quota_exhausted', 'invalid_ai_response', 'catalogue_unreadable',
 ]);
 
 export function application({ db, storage, requireUser, BackendError, envProvider, fetchImpl }) {
@@ -270,7 +270,7 @@ const messages = {
   trial_unavailable: 'The platform free trial did not answer. Try again shortly, or connect your own provider key in Settings.',
   no_model_available: 'This provider has no enabled model. Turn a model on in Settings → AI Providers.',
   byok_consent_required: 'Confirm the notice that your own provider account is billed before saving a key.',
-  invalid_model: 'A model id starts with a letter or digit and uses only letters, digits and . _ - : / — no spaces or other symbols. Example: "qwen/qwen3.8-omni-flash:free".',
+  invalid_model: 'A model id starts with a letter, digit or ~ and uses only letters, digits and . _ - : / ~ — no spaces or other symbols. Example: "qwen/qwen3.8-omni-flash:free".',
   provider_auth_failed: 'The provider rejected that key. Check it was copied in full and has not expired.',
   provider_model_not_found: 'That model name is not available on this provider. Fetch the model list and pick one.',
   provider_access_denied: 'Your account on that provider is not entitled to this model — it needs a plan, credits or an enable step on their side.',
@@ -292,6 +292,7 @@ const messages = {
   invalid_ai_response: 'The AI provider answered, but the reply could not be read as an answer. Nothing was charged and no answer was invented. Please try again.',
   unverified_model: 'The model that answered is not on the verified free list, so the answer was discarded and no credits were spent.',
   pricing_not_verified: 'This model’s zero pricing has not been verified yet, so it stays disabled.',
+  catalogue_unreadable: 'The provider’s model catalogue could not be read in full, so no price could be verified. Nothing was changed and no model was enabled. Try again shortly.',
   payload_too_large: 'That file is too large. Try a smaller photo or a PDF under 10 MB.',
   invalid_upload: 'That file was not accepted. Upload a PDF, PNG, JPEG, WebP or HEIC image.',
   upload_pending: 'The file has not finished uploading. Retry in a moment.',

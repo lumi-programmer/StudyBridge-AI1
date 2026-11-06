@@ -219,18 +219,34 @@ Written so nobody has to guess what is real. "Unverified" is not "working".
 
 ## Central AI gateway and the credits economy
 
-34. **The gateway's free-model policy has never met a live provider catalogue.** The
-    rule — free only when the provider published exactly zero for input *and* output —
-    is proven against a double that serves a catalogue in OpenRouter's shape, including
-    the case where a router answers with a model that is not on the verified-free list
-    (refused, refunded, nothing charged). What is **not** on record is a real
-    `GET https://openrouter.ai/api/v1/models` read through the administrator's
-    **Verify pricing** button: this workspace holds no OpenRouter key, so no catalogue
-    was fetched and no live answer is claimed. The pricing reader accepts
-    `pricing.prompt` / `pricing.completion` (or `pricing.input` / `pricing.output`) as
-    strings or numbers and treats anything else as unverified — it does not parse a
-    provider that publishes its prices in a different shape, and such a model stays
-    disabled rather than being guessed free.
+34. **The gateway's free-model policy has now met the live provider catalogue; a live
+    answer still has not.** The rule — free only when the provider published exactly
+    zero for input *and* output — is proven against a double that serves a catalogue in
+    OpenRouter's shape, including the case where a router answers with a model that is
+    not on the verified-free list (refused, refunded, nothing charged). It is now also
+    proven against the **real** catalogue: `GET https://openrouter.ai/api/v1/models`
+    answers one page of 453 models (813 KB), and the gateway records every one of them,
+    prices 452 of them from the provider's own numbers and finds **14 published at
+    exactly $0** plus the `openrouter/free` router.
+
+    Getting there exposed a real defect, now fixed. The reader cut the body at 600 KB,
+    the live catalogue is 813 KB, so **zero** models were parsed — and the check still
+    reported a cheerful `ok` over an empty list. The limit is now 8 MB, a body that
+    runs past it or is not a list of models fails with `catalogue_unreadable` instead of
+    verifying nothing, and a model is only marked unavailable when the whole catalogue
+    was read. Nineteen published ids were also being thrown away because they begin with
+    `~` (OpenRouter's rolling aliases such as `~openai/gpt-latest`); they are listed and
+    priced now, and being paid models they stay disabled.
+
+    What is **not** on record is a live **answer**: this workspace holds no OpenRouter
+    key, so no generation was attempted and none is claimed.
+    `dev-tools/central-live-check.mjs` performs the catalogue read without a key and says
+    so plainly; with `OPENROUTER_API_KEY` set it runs one real question through the app's
+    own router and prints the reply, the model that answered and the credits charged.
+    The pricing reader accepts `pricing.prompt` / `pricing.completion` (or
+    `pricing.input` / `pricing.output`) as strings or numbers and treats anything else as
+    unverified — it does not parse a provider that publishes its prices in a different
+    shape, and such a model stays disabled rather than being guessed free.
 
 35. **The gateway answered its first real request only after a fix, and the fix is
     covered but the outage was real.** The platform provider's encrypted key was not

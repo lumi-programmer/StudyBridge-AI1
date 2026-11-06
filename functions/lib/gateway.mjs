@@ -15,11 +15,16 @@
 //   3. There is no paid fallback. If no approved free model is available the
 //      answer is a clear temporary-unavailability message.
 
-import { ADAPTERS, guardEndpoint, parseJsonBlock, readBody } from './ai.mjs';
+import { ADAPTERS, guardEndpoint, parseJsonBlock, readBody, readBodyResult } from './ai.mjs';
 import { identifier, int as toInt, modelIdentifier, normaliseApiKey, text as asText, truncate, dayOf, dayOfIso } from './util.mjs';
 
 const CATALOGUE_MAX_PAGES = 8;
-const CATALOGUE_MAX_ITEMS = 400;
+const CATALOGUE_MAX_ITEMS = 1000;
+// OpenRouter's own catalogue is one page of roughly 800 KB for a few hundred
+// models, and it grows. The old 600 KB ceiling cut the real one in half,
+// which left the gateway with zero prices and a cheerful "ok" — the limit is
+// now far above any catalogue a provider publishes.
+const CATALOGUE_MAX_BYTES = 8 * 1024 * 1024;
 const PLATFORM_WIRES = new Set(['openai', 'openrouter', 'gemini']);
 
 // A model may only be selected when every one of these holds. It is one
@@ -377,13 +382,13 @@ export function createGateway(ctx) {
   async function modelRows(providerId) {
     return rows(await db.from('ai_models')
       .select('id,provider_id,model_id,display_name,input_micro_per_1k,output_micro_per_1k,free_tier,pricing_verified,pricing_source,context_window,capabilities,available,enabled,router,fail_streak,cooldown_until,cooldown_reason,last_verified_at')
-      .eq('provider_id', providerId).order('model_id', { ascending: true }).limit(300)) || [];
+      .eq('provider_id', providerId).order('model_id', { ascending: true }).limit(600)) || [];
   }
 
   async function allModelRows() {
     return rows(await db.from('ai_models')
       .select('id,provider_id,model_id,display_name,input_micro_per_1k,output_micro_per_1k,free_tier,pricing_verified,pricing_source,context_window,capabilities,available,enabled,router,fail_streak,cooldown_until,cooldown_reason,last_verified_at')
-      .order('model_id', { ascending: true }).limit(500)) || [];
+      .order('model_id', { ascending: true }).limit(1000)) || [];
   }
 
   // ---- the approved free list ---------------------------------------------
@@ -550,10 +555,24 @@ export function createGateway(ctx) {
         break;
       }
       if (page === 0) firstPageOk = true;
-      const body = parseJsonBlock(await readBody(response, 600000));
+      // The catalogue is the evidence a model's price is zero, so a body that
+      // was cut short or could not be parsed is a failure, never an empty
+      // catalogue that quietly verifies nothing.
+      const read = await readBodyResult(response, CATALOGUE_MAX_BYTES);
+      if (read.truncated) {
+        fail('catalogue_unreadable', 502,
+          'The provider’s model catalogue is larger than this server reads in one answer, so its prices could not be checked.');
+      }
+      const body = parseJsonBlock(read.text);
+      if (!body) {
+        fail('catalogue_unreadable', 502, 'The provider’s model catalogue could not be read as JSON.');
+      }
       const raw = Array.isArray(body?.data) ? body.data
         : Array.isArray(body?.models) ? body.models
-          : Array.isArray(body) ? body : [];
+          : Array.isArray(body) ? body : null;
+      if (!raw) {
+        fail('catalogue_unreadable', 502, 'The provider answered, but not with a list of models.');
+      }
       items.push(...raw);
       token = String(body?.nextPageToken || body?.next_page_token || '');
       if (!token) break;
@@ -636,11 +655,17 @@ export function createGateway(ctx) {
     // than deleted, so its history stays readable. A router is left alone: it
     // is a routing option rather than a catalogue entry, and losing it from
     // the list must not take the free route with it.
-    for (const [modelId, row] of existing) {
-      if (seen.has(modelId)) continue;
-      if (row.router === true) continue;
-      rows(await db.from('ai_models').update({ available: false, enabled: false, updated_at: new Date().toISOString() })
-        .eq('id', row.id).eq('provider_id', providerId).select('id'));
+    //
+    // This sweep only runs when the whole catalogue was read. A catalogue that
+    // was cut short has not proved that a model is gone, and a model that is
+    // still published must not be disabled because the read stopped early.
+    if (!catalogue.truncated) {
+      for (const [modelId, row] of existing) {
+        if (seen.has(modelId)) continue;
+        if (row.router === true) continue;
+        rows(await db.from('ai_models').update({ available: false, enabled: false, updated_at: new Date().toISOString() })
+          .eq('id', row.id).eq('provider_id', providerId).select('id'));
+      }
     }
     await db.from('ai_providers').update({
       last_status: 'ok', last_error: '', checked_at: new Date().toISOString(), updated_at: new Date().toISOString(),

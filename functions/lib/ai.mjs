@@ -46,7 +46,7 @@ const SETTINGS = {
 // Model ids are copied from the provider's own list, namespaces and suffixes
 // included — "qwen/qwen3.8-omni-flash:free" is a real id, not something to
 // rewrite, truncate or swap for another model.
-const MODEL_ID_HINT = 'Copy the model id exactly as the provider lists it, e.g. "gemini-2.5-flash" or "qwen/qwen3.8-omni-flash:free". Letters, digits and . _ - : / only, no spaces, up to 128 characters.';
+const MODEL_ID_HINT = 'Copy the model id exactly as the provider lists it, e.g. "gemini-2.5-flash" or "qwen/qwen3.8-omni-flash:free". Letters, digits and . _ - : / ~ only, no spaces, up to 128 characters.';
 
 // What the flags from normaliseApiKey mean for the student, said once at the
 // moment they paste. The cleaned value is what gets encrypted and stored, so
@@ -291,9 +291,13 @@ function authHeaders(wire, apiKey) {
   return { Authorization: `Bearer ${apiKey}` };
 }
 
-export async function readBody(response, limit = 400000) {
+// Read a provider body with a hard byte limit, and say whether the limit cut
+// it short. A body that ran past the limit is dropped rather than half-read,
+// but the caller is told: a catalogue that was cut in half must never look
+// like a catalogue with nothing in it.
+export async function readBodyResult(response, limit = 400000) {
   const reader = response.body?.getReader();
-  if (!reader) return '';
+  if (!reader) return { text: '', truncated: false };
   let size = 0;
   const chunks = [];
   try {
@@ -301,7 +305,7 @@ export async function readBody(response, limit = 400000) {
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > limit) { await reader.cancel(); return ''; }
+      if (size > limit) { await reader.cancel(); return { text: '', truncated: true }; }
       chunks.push(value);
     }
   } finally {
@@ -310,7 +314,12 @@ export async function readBody(response, limit = 400000) {
   let offset = 0;
   const merged = new Uint8Array(size);
   for (const chunk of chunks) { merged.set(chunk, offset); offset += chunk.length; }
-  return new TextDecoder().decode(merged);
+  return { text: new TextDecoder().decode(merged), truncated: false };
+}
+
+export async function readBody(response, limit = 400000) {
+  const result = await readBodyResult(response, limit);
+  return result.truncated ? '' : result.text;
 }
 
 // A provider that answers with something that is not JSON is an unavailable

@@ -48,9 +48,14 @@ shell take precedence). The deployed Function never reads a file.
 | `FREE_TRIAL_*` | the platform Free Trial | the trial reports "Not switched on yet", honestly |
 | `AI_*` and `MODEL_COOLDOWN_*` | tuning retries and cooldown | the built-in defaults in [tuning retries](#tuning-retries-cooldown-and-fallback) apply |
 
-The committed `.env` contains `CREDENTIAL_KEY=dev-credential-key-local-only`. That value
+The local `.env` contains `CREDENTIAL_KEY=dev-credential-key-local-only`. That value
 is deliberately not a secret: it exists so local provider saving works out of the box,
 and `.env` is gitignored. **Never put a real provider key in it.**
+
+In the preview the browser always resolves to the first stub user, `student-a`, so
+`ADMIN_OWNER_IDS=student-a` in `.env` is what makes the local admin console answer
+instead of `admin_required`. It is a local-only convenience — the deployed Secret takes
+real owner ids.
 
 Note that `CREDENTIAL_KEY` is the AES-GCM key (SHA-256 of the string). Changing it makes
 previously stored provider keys undecryptable — set it once per environment.
@@ -96,6 +101,13 @@ the output price are exactly zero. A model whose price is missing or unreadable 
 recorded as `pricing_verified: false` and is never called. A paid model is recorded
 as `free_tier: false` and is disabled. The catalogue is re-read daily, and sooner
 after a failed check, so a price change cannot quietly make a model billable.
+
+A catalogue that cannot be read is a failure, not an empty list: the reader allows 8 MB
+per page, and a body that runs past that, is not JSON, or is not a list of models stops
+the check with `catalogue_unreadable` instead of verifying nothing and reporting
+success. OpenRouter's own catalogue is one page of roughly 800 KB, so it is read whole;
+a model that was not seen is never marked unavailable unless the whole catalogue was
+read.
 
 **The daily allowance.** Each student may ask 10 successful questions per
 `Asia/Karachi` calendar day (midnight Pakistan time, UTC+5). The count lives in
@@ -269,7 +281,7 @@ while `web/` files are read per request but the browser may need a reload.
 ./dev-tools/node.sh dev-tools/_run.mjs         # the behaviour suite
 ```
 
-Expected last line: `SUITE: 619/619 passed`. Sections: **A** core (bootstrap, profile,
+Expected last line: `SUITE: 633/633 passed`. Sections: **A** core (bootstrap, profile,
 wallet, daily, deletion), **B** library and books, **C** scanner, **D** providers and BYOK
 (including namespaced model ids and the exact wire format), **E** learning (quizzes,
 sessions, games, progress), **F** owner isolation, **G** failure paths with the provider
@@ -299,7 +311,21 @@ and the eleventh refused, the midnight `Asia/Karachi` reset with credits survivi
 balance that cannot be moved from the browser, no cross-student wallet access, no paid
 model ever called, an unknown-price model refused, a rate limit handled without a charge,
 the provider key never reaching the browser, and eleven concurrent requests unable to pass
-the cap or double-charge.
+the cap or double-charge — plus a catalogue larger than the old 600 KB ceiling being read
+whole, an unreadable catalogue failing as `catalogue_unreadable` instead of reporting a
+successful check over an empty list, a body cut short by the limit being reported rather
+than silently dropped, and a published id that begins with `~` being listed and priced
+instead of thrown away.
+
+`./dev-tools/node.sh dev-tools/central-live-check.mjs` is the central provider's live
+check. It boots the app's own routes, asks `GET /api/ai/settings` — which is what makes
+the central provider provision itself — and prints whether it is configured, whether the
+catalogue verified, how many models the provider published and how many of them are
+published at exactly $0, the key hint (last four characters only) and whether the stored
+cipher contains the plaintext. With no `OPENROUTER_API_KEY` it stops after the catalogue
+read and says **"no generation was attempted and no answer is claimed"**; with a key it
+runs one real question through the router, the adapter and the ledger, and prints the
+reply, the model that answered, the tokens and the credits charged.
 
 `./dev-tools/node.sh dev-tools/gemini-config-audit.mjs` audits the whole saved Gemini
 configuration end to end: it saves a provider exactly as the Setup screen records it

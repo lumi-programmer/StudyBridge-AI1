@@ -9,7 +9,11 @@ const IDENT_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 // provider id may not contain it. It is safe because no adapter interpolates the
 // id into a path without encoding it, and the OpenAI-style adapter sends it only
 // inside a JSON body.
-const MODEL_IDENT_RE = /^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$/;
+// The leading "~" is allowed too: OpenRouter publishes its rolling aliases as
+// "~openai/gpt-latest" and "~anthropic/claude-opus-latest". "~" is an
+// unreserved character in a URL and cannot form a path segment, so accepting it
+// costs nothing and keeps the provider's catalogue whole.
+const MODEL_IDENT_RE = /^[A-Za-z0-9~][A-Za-z0-9_.:~\/-]{0,127}$/;
 
 export function uuid(v) {
   return typeof v === 'string' && UUID_RE.test(v.toLowerCase()) ? v.toLowerCase() : null;
