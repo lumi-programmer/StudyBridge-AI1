@@ -281,7 +281,7 @@ while `web/` files are read per request but the browser may need a reload.
 ./dev-tools/node.sh dev-tools/_run.mjs         # the behaviour suite
 ```
 
-Expected last line: `SUITE: 633/633 passed`. Sections: **A** core (bootstrap, profile,
+Expected last line: `SUITE: 636/636 passed`. Sections: **A** core (bootstrap, profile,
 wallet, daily, deletion), **B** library and books, **C** scanner, **D** providers and BYOK
 (including namespaced model ids and the exact wire format), **E** learning (quizzes,
 sessions, games, progress), **F** owner isolation, **G** failure paths with the provider
@@ -314,8 +314,9 @@ the provider key never reaching the browser, and eleven concurrent requests unab
 the cap or double-charge — plus a catalogue larger than the old 600 KB ceiling being read
 whole, an unreadable catalogue failing as `catalogue_unreadable` instead of reporting a
 successful check over an empty list, a body cut short by the limit being reported rather
-than silently dropped, and a published id that begins with `~` being listed and priced
-instead of thrown away.
+than silently dropped, a published id that begins with `~` being listed and priced
+instead of thrown away, and a cold-start admin overview counting the platform provider
+in the same response whose health table lists it.
 
 `./dev-tools/node.sh dev-tools/central-live-check.mjs` is the central provider's live
 check. It boots the app's own routes, asks `GET /api/ai/settings` — which is what makes

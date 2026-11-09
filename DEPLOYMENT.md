@@ -134,7 +134,7 @@ config file.
 ## Publish sequence
 
 1. Validate the source unchanged since the last green run:
-   `js-syntax`, `js-imports`, `css-classes`, `sync-flat.sh`, `_run.mjs` → `SUITE: 633/633 passed`.
+   `js-syntax`, `js-imports`, `css-classes`, `sync-flat.sh`, `_run.mjs` → `SUITE: 636/636 passed`.
    Three probes back the outbound claims: `dev-tools/outbound-probe.mjs` (request counts,
    concurrency and retry gaps over a socket), `dev-tools/gemini-path-probe.mjs` (the
    literal Gemini request line against an endpoint that enforces Google's URL binding) and

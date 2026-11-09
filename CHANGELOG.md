@@ -1,7 +1,42 @@
 # Changelog
 
 Dates follow the work sessions that produced each change; the project folder was created
-2026-10-31 and the latest session is 2026-11-06.
+2026-10-31 and the latest session is 2026-11-09.
+
+## 2026-11-09 — The cold-start admin overview counted 0 providers
+
+The brief was to find the exact cause of "0 enabled providers / 0 enabled models" on
+StudyBridge Free AI. There were two causes with one symptom, and the first was already
+fixed on 2026-11-06: the Settings router card counted only the student's own BYOK rows
+while the router answered from the platform's `ai_providers` / `ai_models` pool
+(commit `0f6a740`, verified live at 1 provider / 15 models / 9 vision).
+
+### Fixed — `analytics()` was the one gateway reader that skipped provisioning
+
+- **The first admin overview after a cold start printed "0 providers".** The central
+  provider is provisioned lazily by the first reader that touches it — `health()`,
+  `approved()`, `status()` and `centralState()` all call `ensureCentral()` first.
+  `gateway.analytics()` did not, and the overview handler computes analytics **before**
+  health. So on a fresh process the provider row did not exist at line one and did by
+  line two: the same response showed `analytics.providers: 0` beside a health table
+  listing `openrouter-central` as healthy with 425 models. The next request showed the
+  right number, which is what made the zeros look intermittent.
+- **The fix is one line** — `analytics()` now calls `ensureCentral()` first, exactly
+  like every other reader. It provisions the same rows from the environment, touches
+  no key, no cipher and no price gate; no paid model became reachable.
+
+### Verified
+
+| | |
+| --- | --- |
+| Cold-start live check | preview restarted, `GET /api/admin/overview` made the **first** request: `analytics.providers: 1`, matching the health table (before: 0) |
+| Suite | `SUITE: 636/636 passed` — 633 before, plus the three M19 checks |
+
+### Added — regression case M19
+
+A fresh environment where the admin overview is the very first request must count the
+platform provider and match the health table beside it — the case that fails on the old
+ordering and passes now.
 
 ## 2026-11-06 — The key was in the `.env`; the server was started before it
 

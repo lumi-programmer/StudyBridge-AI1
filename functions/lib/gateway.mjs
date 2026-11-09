@@ -921,6 +921,11 @@ export function createGateway(ctx) {
   // ---- economy analytics ---------------------------------------------------
 
   async function analytics() {
+    // The central provider rows are provisioned lazily on the first read, and
+    // analytics runs before health() in the admin overview. Without this line
+    // the first overview after a cold start counts 0 providers in the very
+    // response whose health table lists the platform provider as healthy.
+    await ensureCentral();
     const wallets = rows(await db.from('wallets').select('owner_id,balance,earned,spent').limit(5000)) || [];
     const students = rows(await db.from('profiles').select('id,owner_id').limit(5000)) || [];
     const day = today();

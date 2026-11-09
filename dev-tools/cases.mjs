@@ -2778,6 +2778,29 @@ export async function sectionPhase2() {
       shell.json?.free_models?.central?.free_models === 1, shell.json?.free_models?.central);
   }
 
+  // ---- M19: the admin overview counts the platform provider on a cold start -
+  //
+  // analytics() used to read ai_providers without provisioning the central
+  // provider first, so the first overview after a cold start printed
+  // "0 providers" in the very response whose health table listed the platform
+  // provider as healthy — and the second load quietly showed the right number.
+  {
+    const catalogue = { data: [...FREE_CATALOGUE.data] };
+    const double = gatewayDouble(catalogue, { models: { [FREE_FIRST]: { content: 'ok' } } });
+    const { env } = await centralEnv(double);
+    // The very first request this environment handles is the admin overview —
+    // nothing has provisioned the gateway yet.
+    const overview = await env.call('GET', '/api/admin/overview');
+    const analytics = overview.json?.analytics || {};
+    const health = overview.json?.health || [];
+    t.ok('M19 a cold-start overview counts the platform provider',
+      analytics.providers === 1, analytics);
+    t.ok('M19 the provider count matches the health table beside it',
+      health.length === analytics.providers, { analytics: analytics.providers, health: health.length });
+    t.ok('M19 the approved free models are counted too',
+      analytics.approved_free_models > 0, analytics);
+  }
+
   return { env: null, report: t.summary() };
 }
 
