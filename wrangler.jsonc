@@ -1,0 +1,22 @@
+// Cloudflare Workers configuration for the StudyBridge AI API.
+//
+// Secrets are NOT stored in this file. Set them with `wrangler secret put <NAME>`
+// (or the dashboard) before the Worker can start:
+//   SUPABASE_SERVICE_ROLE_KEY  service-role JWT for Postgres REST + storage signing
+//   CREDENTIAL_KEY             AES-GCM key material for stored provider keys
+//   ADMIN_OWNER_IDS            comma-separated owner ids granted the admin role
+//   OPENROUTER_API_KEY         StudyBridge Free AI central provider (optional:
+//                              omitting it leaves the central provider out of service)
+// For local `wrangler dev`, put the same names in `.dev.vars` (gitignored).
+//
+// SUPABASE_URL is non-secret but project-specific: add it to `vars` below as
+// the real project URL at deploy time.
+{
+  "name": "studybridge-api",
+  "main": "worker/entry.mjs",
+  "compatibility_date": "2025-04-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "SUPABASE_STORAGE_BUCKET": "studybridge"
+  }
+}
