@@ -3,6 +3,8 @@ import { loadBootstrap, store, subscribe } from './store.js';
 import { clear, clock, errorCard, h, num } from './ui.js';
 import { MODE_LABEL, current, finishSession, onFocus, remainingSeconds, run } from './focus.js';
 import { adoptProfile, apply as applyTheme, resolved, toggle } from './theme.js';
+import { initPwa } from './pwa.js';
+import { configured as authConfigured, adoptRecoveryTokens, hasSession } from './auth.js';
 
 const ROUTES = {
   dashboard: () => import('./views/dashboard.js'),
@@ -18,11 +20,12 @@ const ROUTES = {
   rewards: () => import('./views/rewards.js'),
   admin: () => import('./views/admin.js'),
   settings: () => import('./views/settings.js'),
+  login: () => import('./views/login.js'),
 };
 const TITLES = {
   dashboard: 'Dashboard', spaces: 'My Spaces', library: 'My Library', scanner: 'Smart Scanner', tutor: 'AI Tutor',
   focus: 'Focus Mode', games: 'Game Center', streak: 'Daily Streaks', progress: 'My Progress', wallet: 'Bridge Wallet',
-  rewards: 'Rewards Center', admin: 'Admin', settings: 'Settings', notfound: 'Page not found',
+  rewards: 'Rewards Center', admin: 'Admin', settings: 'Settings', login: 'Sign in', notfound: 'Page not found',
 };
 
 const view = document.getElementById('view');
@@ -44,7 +47,21 @@ export function navigate(hash) {
 
 async function route() {
   const token = ++renderToken;
+  // A recovery email lands on any route with an auth fragment in the URL; it
+  // is adopted (or refused) before the fragment can be parsed as a route, and
+  // the sign-in view picks up the outcome from consumeRecovery().
+  if (authConfigured) {
+    const recovery = adoptRecoveryTokens();
+    if (recovery.kind !== 'none') { navigate('#/login'); return; }
+  }
   const { name, args, path, query } = parseHash();
+  // Production auth: without a session, every section routes through sign-in.
+  // The intended destination is kept so sign-in can return the student there.
+  if (authConfigured && !hasSession() && name !== 'login') {
+    try { sessionStorage.setItem('studybridge.return_path', location.href); } catch { /* private mode */ }
+    navigate('#/login');
+    return;
+  }
   document.body.classList.remove('nav-open');
   document.getElementById('navToggle').setAttribute('aria-expanded', 'false');
   for (const link of document.querySelectorAll('[data-nav]')) {
@@ -168,4 +185,5 @@ function wireShell() {
 }
 
 wireShell();
+initPwa();
 route().then(() => { paintChips(); run(); paintDock(current()); });

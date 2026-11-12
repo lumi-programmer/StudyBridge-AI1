@@ -2801,7 +2801,130 @@ export async function sectionPhase2() {
       analytics.approved_free_models > 0, analytics);
   }
 
+  // ---- M20: a replay of a settled request never frees its daily slot -------
+  //
+  // Audit finding H-1. Repeating an already-answered client_key used to delete
+  // the settled request's slot on the way out, so every repeat handed a place
+  // in the allowance back and the ten-question cap could be worn down by
+  // resubmitting one key. The repeat must be a free replay that leaves the
+  // settled request's slot exactly where it is.
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, { models: { [FREE_FIRST]: { content: 'ok' } } });
+    const { env, spaceId } = await centralEnv(double);
+    const login = await env.call('POST', '/api/daily/login');
+    const key = uuid();
+    const first = await env.call('POST', `/api/spaces/${spaceId}/chat`, { message: 'what is acceleration', client_key: key });
+    t.ok('M20 the first submission is answered and charged',
+      first.status === 200 && first.json?.credits_spent === 2, first.json);
+    const again = await env.call('POST', `/api/spaces/${spaceId}/chat`, { message: 'what is acceleration', client_key: key });
+    t.ok('M20 the repeat is answered as a replay',
+      again.status === 200 && again.json?.replayed === true, again.json);
+    t.ok('M20 the replay shows the same answer', again.json?.reply === first.json?.reply,
+      { first: first.json?.reply, again: again.json?.reply });
+    const spendsAfterReplay = ledgerOf(env, 'student-a').filter(row => row.direction === 'spend');
+    t.ok('M20 the replay charges nothing', spendsAfterReplay.length === 1 && spendsAfterReplay[0]?.amount === 2,
+      spendsAfterReplay.map(row => [row.amount, row.reason]));
+    t.ok('M20 the settled request keeps its daily slot',
+      env.db.table('ai_daily_slots').filter(slot => slot.request_key === key).length === 1,
+      env.db.table('ai_daily_slots').map(slot => [slot.request_key, slot.slot]));
+    t.ok('M20 the allowance still counts the settled question',
+      (await env.call('GET', '/api/wallet')).json?.daily_ai?.used === 1, null);
+    let answered = 0;
+    for (let index = 0; index < 9; index += 1) {
+      const chat = await env.call('POST', `/api/spaces/${spaceId}/chat`, { message: `follow-up ${index}`, client_key: uuid() });
+      if (chat.status === 200) answered += 1;
+    }
+    t.ok('M20 the remaining nine questions are answered', answered === 9, answered);
+    const eleventh = await env.call('POST', `/api/spaces/${spaceId}/chat`, { message: 'one too many', client_key: uuid() });
+    t.ok('M20 the cap still holds at ten despite the replay', eleventh.status === 429
+      && eleventh.json?.error === 'daily_limit_reached', eleventh.json);
+  }
+
+  // ---- M21: a concurrent duplicate charges once and keeps one slot ---------
+  //
+  // Two submissions of the same client_key arrive together. One wins; the
+  // other waits for the first answer. Under the pre-H-1 code the losing
+  // operation released the slot by key and wiped the winner's place in the
+  // day's allowance; now only a slot the loser claimed itself can go, and one
+  // question means one charge and one slot.
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, { models: { [FREE_FIRST]: { content: 'ok' } } });
+    const { env, spaceId } = await centralEnv(double);
+    const login = await env.call('POST', '/api/daily/login');
+    const before = login.json?.balance;
+    const key = uuid();
+    const [firstTry, secondTry] = await Promise.all([
+      env.call('POST', `/api/spaces/${spaceId}/chat`, { message: 'what is acceleration', client_key: key }),
+      env.call('POST', `/api/spaces/${spaceId}/chat`, { message: 'what is acceleration', client_key: key }),
+    ]);
+    const answeredTries = [firstTry, secondTry].filter(result => result.status === 200);
+    t.ok('M21 the duplicate pair produces exactly one answer', answeredTries.length === 1,
+      [firstTry.status, secondTry.status]);
+    const spends = ledgerOf(env, 'student-a').filter(row => row.direction === 'spend');
+    t.ok('M21 the pair is charged exactly once, 2 BC',
+      spends.length === 1 && spends[0]?.amount === 2, spends.map(row => [row.amount, row.reason]));
+    t.ok('M21 the pair holds exactly one daily slot',
+      env.db.table('ai_daily_slots').filter(slot => slot.request_key === key).length === 1,
+      env.db.table('ai_daily_slots').map(slot => [slot.request_key, slot.slot]));
+    const wallet = await env.call('GET', '/api/wallet');
+    t.ok('M21 the allowance counts the question once', wallet.json?.daily_ai?.used === 1, wallet.json?.daily_ai);
+    t.ok('M21 the balance fell by exactly 2 BC', wallet.json?.balance === before - 2, { before, after: wallet.json?.balance });
+  }
+
+  // ---- M22: a failed charge still releases its own slot --------------------
+  //
+  // The legitimate cleanup H-1 had to preserve: a request that cannot be paid
+  // for keeps no place in the day's allowance, leaves its key retryable, and
+  // never reaches a provider. The price is raised past the student's balance
+  // through the administrator's own economy API, so the debit refuses.
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, { models: { [FREE_FIRST]: { content: 'ok' } } });
+    const { env, spaceId } = await centralEnv(double);
+    const key = uuid();
+    const priced = await env.call('PATCH', '/api/admin/economy', { pricing: { basic_question: 500 } });
+    t.ok('M22 the administrator can raise the price', priced.status === 200, priced.json);
+    const before = (await env.call('GET', '/api/wallet')).json;
+    const broke = await env.call('POST', `/api/spaces/${spaceId}/chat`, { message: 'what is acceleration', client_key: key });
+    t.ok('M22 an unpaid request is refused', broke.status === 409 && broke.json?.error === 'insufficient_credits', broke.json);
+    const wallet = await env.call('GET', '/api/wallet');
+    t.ok('M22 the refused request keeps the full allowance', wallet.json?.daily_ai?.used === 0
+      && wallet.json?.daily_ai?.remaining === 10, wallet.json?.daily_ai);
+    t.ok('M22 the refused request left no slot behind',
+      env.db.table('ai_daily_slots').filter(slot => slot.request_key === key).length === 0,
+      env.db.table('ai_daily_slots').map(slot => [slot.request_key, slot.slot]));
+    t.ok('M22 the refused request moved no credits', wallet.json?.balance === before?.balance, { before: before?.balance, after: wallet.json?.balance });
+    const failed = env.db.table('ai_requests').filter(row => row.request_key === key);
+    t.ok('M22 the refused request is recorded as failed', failed[0]?.state === 'failed', failed[0]);
+    t.ok('M22 the provider was never called for an unpaid request',
+      double.count(FREE_FIRST) === 0, double.modelsCalled());
+  }
+
+  // ---- M23: a retry after a failed charge is attempt 2 with one debit ------
+  //
+  // The same key comes back once the price is affordable again. It gets its
+  // own attempt number and its own debit; the failed attempt leaves no ledger
+  // row behind.
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, { models: { [FREE_FIRST]: { content: 'ok' } } });
+    const { env, spaceId } = await centralEnv(double);
+    const key = uuid();
+    await env.call('PATCH', '/api/admin/economy', { pricing: { basic_question: 500 } });
+    await env.call('POST', `/api/spaces/${spaceId}/chat`, { message: 'what is acceleration', client_key: key });
+    await env.call('PATCH', '/api/admin/economy', { pricing: { basic_question: 2 } });
+    const login = await env.call('POST', '/api/daily/login');
+    const retry = await env.call('POST', `/api/spaces/${spaceId}/chat`, { message: 'what is acceleration', client_key: key });
+    t.ok('M23 the retry after the failed charge is answered',
+      retry.status === 200 && retry.json?.credits_spent === 2, retry.json);
+    const record = env.db.table('ai_requests').filter(row => row.request_key === key)[0];
+    t.ok('M23 the retry carries attempt 2 and settles', record?.attempt === 2 && record?.state === 'settled', record);
+    const spends = ledgerOf(env, 'student-a').filter(row => row.direction === 'spend');
+    t.ok('M23 exactly one debit exists and it names attempt 2',
+      spends.length === 1 && String(spends[0]?.reason).endsWith(':2'), spends.map(row => [row.amount, row.reason]));
+    t.ok('M23 the balance is the login minus the single 2 BC charge',
+      (await env.call('GET', '/api/wallet')).json?.balance === (login.json?.balance || 30) - 2, null);
+  }
+
   return { env: null, report: t.summary() };
 }
 
-export { tracker, makeAiFetch, pdfWith, pngBytes, upload, uuid };
+export { tracker, makeAiFetch, pdfWith, pngBytes, upload, uuid, gatewayDouble, FREE_CATALOGUE, FREE_FIRST };

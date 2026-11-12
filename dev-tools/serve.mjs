@@ -17,6 +17,7 @@ const PREFIX = '/functions/v1/app';
 const TYPES = {
   '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
   '.svg': 'image/svg+xml', '.json': 'application/json', '.png': 'image/png', '.ico': 'image/x-icon',
+  '.webmanifest': 'application/manifest+json',
 };
 
 // Secrets are read from the real environment here, so a local run can exercise

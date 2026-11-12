@@ -206,10 +206,17 @@ export function createRewards(ctx) {
     return null;
   }
 
-  async function releaseDailySlot(ownerId, requestKey) {
+  // With a slot number, exactly one row goes: a replay or a failure hands back
+  // only the place this very call claimed, and cannot wipe the slot another
+  // concurrent operation holds for the same key. Without one (a refund), every
+  // slot the key still holds goes, because the whole request is being undone.
+  async function releaseDailySlot(ownerId, requestKey, slotNumber = null) {
     if (!requestKey) return;
     const day = dayOf();
-    await db.from('ai_daily_slots').delete().eq('owner_id', ownerId).eq('day', day).eq('request_key', requestKey);
+    let query = db.from('ai_daily_slots').delete()
+      .eq('owner_id', ownerId).eq('day', day).eq('request_key', requestKey);
+    if (slotNumber !== null && slotNumber !== undefined) query = query.eq('slot', slotNumber);
+    await query;
   }
 
   // What the student has used today and what is left, in the words the
@@ -250,6 +257,10 @@ export function createRewards(ctx) {
     // row is written, so the cap holds even when several requests arrive at
     // the same instant, and it is released again if the request fails.
     let slot = null;
+    // The slot this call claimed itself. A slot that already existed — a retry
+    // or replay of a request that holds one — belongs to the original request
+    // and must never be released here (audit finding H-1).
+    let claimedSlot = null;
     if (max > 0) {
       const day = dayOf();
       const slots = await daySlots(ownerId, day);
@@ -262,6 +273,7 @@ export function createRewards(ctx) {
       if (!slot) {
         fail('daily_limit_reached', 429, `You have used all ${max} AI questions for today. The allowance returns at midnight Pakistan time. Free study tools, notes, quizzes from your own text, focus and games are unaffected.`);
       }
+      claimedSlot = slot.reused ? null : slot;
     }
 
     const inserted = rows(await db.from('ai_requests').insertIfAbsent({
@@ -277,14 +289,19 @@ export function createRewards(ctx) {
       if (!record) fail('ledger_unavailable', 503);
       if (record.state === 'settled') {
         // Already answered and already paid for: replay, never charge again.
-        if (slot) await releaseDailySlot(ownerId, key);
+        // Only a slot this call claimed itself goes back; the settled
+        // request's own slot stays consumed, or the cap could be bypassed by
+        // repeating the same key.
+        if (claimedSlot) await releaseDailySlot(ownerId, key, claimedSlot.slot);
         return { key, credits: record.credits, state: 'settled', replayed: true, attempt: record.attempt, charged: false };
       }
       const age = Date.now() - Date.parse(String(record.created_at || ''));
       if (record.state === 'reserved' && age < RESERVATION_STALE_MS) {
         // The same request is already running. The second submit waits for the
-        // first one's answer instead of paying for a second one.
-        if (slot) await releaseDailySlot(ownerId, key);
+        // first one's answer instead of paying for a second one. Only a slot
+        // this call claimed itself goes back, so the in-flight request keeps
+        // its place in the day's allowance.
+        if (claimedSlot) await releaseDailySlot(ownerId, key, claimedSlot.slot);
         return { key, credits: record.credits, state: 'reserved', replayed: true, inFlight: true, attempt: record.attempt, charged: false };
       }
       // Refunded, failed or abandoned: this is a retry of the same request, so
@@ -294,7 +311,7 @@ export function createRewards(ctx) {
         .update({ state: 'reserved', attempt, credits: amount, detail: '', created_at: nowIso(), settled_at: null })
         .eq('id', record.id).eq('owner_id', ownerId).select('id'));
       if (!updated?.length) {
-        if (slot) await releaseDailySlot(ownerId, key);
+        if (claimedSlot) await releaseDailySlot(ownerId, key, claimedSlot.slot);
         fail('ledger_conflict', 409);
       }
       record = { ...record, attempt, credits: amount, state: 'reserved' };
@@ -315,11 +332,12 @@ export function createRewards(ctx) {
         // The debit did not happen, so nothing is owed and nothing may be
         // refunded later. The reservation is closed as failed, which frees the
         // key for a genuine retry instead of leaving it pending for the whole
-        // stale window. The day's allowance is handed back with it.
+        // stale window. The day's allowance is handed back with it — by slot
+        // number, so a concurrent duplicate for the same key keeps its own.
         rows(await db.from('ai_requests')
           .update({ state: 'failed', detail: String(error?.code || 'charge_failed').slice(0, 300), settled_at: nowIso() })
           .eq('id', record.id).eq('owner_id', ownerId).select('id'));
-        if (slot) await releaseDailySlot(ownerId, key);
+        if (slot) await releaseDailySlot(ownerId, key, slot.slot);
         throw error;
       }
       if (charged.replayed) {

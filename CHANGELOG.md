@@ -1,7 +1,76 @@
 # Changelog
 
 Dates follow the work sessions that produced each change; the project folder was created
-2026-10-31 and the latest session is 2026-11-09.
+2026-10-31 and the latest session is 2026-11-10.
+
+## 2026-11-10 — The verification SQL aborted in the Supabase SQL editor
+
+Section 12 of `supabase/verify/verify_migration.sql` failed in the SQL editor at its first
+bare probe: under `SET LOCAL ROLE authenticated` the query raised the very error it expected
+(`permission denied for schema app`), and the editor aborts the whole batch on an error, so
+the remaining probes and the `ROLLBACK` never ran. The denial itself is correct behaviour —
+migration 3 revokes schema USAGE from `authenticated` — it just could not be left to escape.
+
+- Section 12 was first rewritten to use a `pg_temp` function returning result rows, populated
+  into a `pg_temp` table inside a rolled-back transaction. That still failed in the editor
+  because the connection pooler can route consecutive statements to different backends, so
+  the temporary table created in one statement was not visible to the next (42P01).
+- Section 12 now runs the entire simulation in a single PL/pgSQL `DO` block: it assumes
+  `authenticated`, attempts each of the eight probes, catches `insufficient_privilege`
+  (SQLSTATE 42501), emits a NOTICE per probe plus a summary NOTICE, and raises an EXCEPTION
+  only if a probe actually executed as authenticated (a real security failure). The `DO`
+  block sits inside a rolled-back transaction, so even a successful probe leaves nothing
+  behind.
+- Sections 1-11 are unchanged, as are the migration files, the grants and the RLS policies.
+
+## 2026-11-10 — The audit's H-1: a replay freed the answerer's daily slot
+
+The independent audit of the Supabase migration files found one high-risk issue (H-1) and
+five verification gaps (M-1..M-5). The corrections are applied to both ledgers — the
+running JavaScript (`functions/lib/rewards.mjs`) and the migration that mirrors it
+(`supabase/migrations/20261110000004_bridge_credits_rpc.sql`) — so the two stay one
+contract. No migration has been applied anywhere; the files await review.
+
+### Fixed — H-1, the daily-slot release
+
+- **The bug.** `reserveAi`/`reserve_ai` released the daily slot *by request key* on the
+  replay paths. A repeat of an already-answered `client_key` deleted the settled
+  request's own slot — every repeat handed a place in the ten-question allowance back,
+  and a concurrent duplicate wiped the winner's slot. The cap was enforceable at ten
+  only while nobody resubmitted a key.
+- **The fix.** The claim step already knew whether it had taken a *new* slot
+  (`claimDailySlot`'s `reused` flag); the release step now knows too.
+  `releaseDailySlot`/`release_daily_slot` take an optional slot number, and the replay
+  paths release only a slot the current call claimed itself. A failed charge releases
+  the exact held slot by number (a concurrent duplicate keeps its own), and a refund
+  still releases every slot the key holds, because the whole request is being undone.
+
+### Fixed — M-1..M-5, the verification SQL
+
+- The `uuid::regclass` cast in section 10 was invalid PostgreSQL; the provider now comes
+  from a join on `ai_providers`.
+- The privilege sweeps in section 7 use a `LEFT JOIN` on `pg_roles` so a grant to
+  **PUBLIC** (grantee oid 0, no roles row) is counted; the same sweep now covers
+  function EXECUTE.
+- New section 12 simulates an authenticated student and expects nothing but
+  permission-denied errors from the tables and the RPCs.
+- New smoke cases: the AI daily cap with `p_daily_max = 1`, an in-flight replay inside
+  the ten-minute window, and a retry with attempt 2 after a failed charge — with the
+  slot-count expectations restated for the fixed behaviour.
+
+### Verified
+
+| | |
+| --- | --- |
+| Suite | `SUITE: 660/660 passed` — 636 before, plus the M20–M23 H-1 regression cases |
+| Migrations | checker: all 34 tables and 30 indexes reproduced exactly |
+
+### Added — regression cases M20–M23
+
+A settled replay keeps the original slot and the cap still holds at ten; a concurrent
+duplicate pair produces one answer, one charge and one slot; a refused charge releases
+its own slot, moves no credits and never reaches a provider; and a retry of the same key
+after a failed charge settles at attempt 2 with exactly one debit.
 
 ## 2026-11-09 — The cold-start admin overview counted 0 providers
 

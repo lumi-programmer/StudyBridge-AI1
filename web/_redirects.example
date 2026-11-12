@@ -1,0 +1,25 @@
+# Cloudflare Pages proxy rules — copy this file to web/_redirects and fill in
+# the real Render service hostname before publishing.
+#
+# The Pages domain serves the static app; every API and storage request must
+# reach the Render backend as SAME-ORIGIN so the browser never talks to a
+# second origin (no CORS involvement, cookies/Authorization stay first-party).
+#
+# Replace YOUR-RENDER-SERVICE with the service name Render assigns, e.g.
+#   https://studybridge-api.onrender.com
+#
+# /functions/v1/app/*  — the whole application API (the same path the deployed
+#                         Edge Function used, so config and code need no change).
+# /storage/*           — server-issued signed upload/download capability URLs.
+#                         The browser PUTs uploads straight to them; the token
+#                         is validated by the backend, never by Cloudflare.
+#
+# 200 means "proxy, keep the client URL". These rules never rewrite the address
+# bar, and no secret value belongs in this file or in any Pages environment
+# variable — the anon key travels inside web/js/config.js only.
+#
+# ORDER MATTERS: Pages applies the first matching rule, so these two lines must
+# come before any catch-all.
+
+/functions/v1/app/* https://YOUR-RENDER-SERVICE.onrender.com/functions/v1/app/:splat 200
+/storage/* https://YOUR-RENDER-SERVICE.onrender.com/storage/:splat 200

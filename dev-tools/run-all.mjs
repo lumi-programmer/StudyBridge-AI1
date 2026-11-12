@@ -1,6 +1,7 @@
 // Runs every smoke section in order and prints the combined report.
 // Reset the Node kernel before each run so edited harness modules reload.
 import { sectionCore, sectionLibrary, sectionScan, sectionProviders, sectionLearn, sectionIsolation, sectionFailures, sectionTrial, sectionResilience, sectionLimits, sectionGemini, sectionAcceptance, sectionPhase2 } from './cases.mjs';
+import { sectionAdapter } from './adapter-cases.mjs';
 
 export async function runAll() {
   const lines = [];
@@ -28,6 +29,7 @@ export async function runAll() {
   await step('K gemini wire', () => sectionGemini());
   await step('L acceptance', () => sectionAcceptance());
   await step('M phase 2', () => sectionPhase2());
+  await step('N adapter', () => sectionAdapter());
 
   return lines.join('\n');
 }
