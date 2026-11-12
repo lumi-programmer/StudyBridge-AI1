@@ -2,6 +2,7 @@
 // Reset the Node kernel before each run so edited harness modules reload.
 import { sectionCore, sectionLibrary, sectionScan, sectionProviders, sectionLearn, sectionIsolation, sectionFailures, sectionTrial, sectionResilience, sectionLimits, sectionGemini, sectionAcceptance, sectionPhase2 } from './cases.mjs';
 import { sectionAdapter } from './adapter-cases.mjs';
+import { sectionWorker } from './worker-cases.mjs';
 
 export async function runAll() {
   const lines = [];
@@ -30,6 +31,7 @@ export async function runAll() {
   await step('L acceptance', () => sectionAcceptance());
   await step('M phase 2', () => sectionPhase2());
   await step('N adapter', () => sectionAdapter());
+  await step('W worker env', () => sectionWorker());
 
   return lines.join('\n');
 }

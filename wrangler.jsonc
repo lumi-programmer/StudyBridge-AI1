@@ -9,10 +9,15 @@
 //                              omitting it leaves the central provider out of service)
 // For local `wrangler dev`, put the same names in `.dev.vars` (gitignored).
 //
+// Optional names the backend reads, set the same way as their kind:
+//   SUPABASE_JWT_SECRET   legacy HS256 verification — only needed if the project signs with the symmetric secret
+//   SUPABASE_ANON_KEY     sent as `apikey` on JWKS fetches — recommended
+//   ALLOWED_ORIGINS       comma list enabling CORS when the API is called cross-origin (not needed behind the Pages proxy)
+//
 // SUPABASE_URL is non-secret but project-specific: add it to `vars` below as
 // the real project URL at deploy time.
 {
-  "name": "studybridge-api",
+  "name": "studybridge-ai-final",
   "main": "worker/entry.mjs",
   "compatibility_date": "2025-04-01",
   "compatibility_flags": ["nodejs_compat"],
