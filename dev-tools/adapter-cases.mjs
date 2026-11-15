@@ -134,7 +134,7 @@ function conflictKeysOf(table) {
   return [...extras.map(keys => ({ keys, isConflictTarget: false })), { keys: ['id'], isConflictTarget: false }];
 }
 
-function fakeSupabase(catalogueDouble) {
+export function fakeSupabase(catalogueDouble) {
   const tables = new Map();
   const storage = new Map();
   const ec = generateKeyPairSync('ec', { namedCurve: 'P-256' });

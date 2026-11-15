@@ -86,5 +86,7 @@ export async function sectionWorker() {
     if (typeof savedKey === 'string') process.env.SUPABASE_SERVICE_ROLE_KEY = savedKey; else delete process.env.SUPABASE_SERVICE_ROLE_KEY;
   }
 
+  const { workerFetchTests } = await import('./worker-fetch-cases.mjs');
+  await workerFetchTests(t);
   return { report: t.summary() };
 }

@@ -1,14 +1,11 @@
-// Worker-side environment resolution, free of any Workers-only imports so the
-// suite can exercise it under plain Node.
-//
-// Cloudflare bindings (vars and secrets) exist only inside a request/handler
-// context — module scope sees an empty process.env — and buildServer()'s
-// requiredEnv reads process.env directly. The entry therefore resolves the
-// bindings into a plain env object, gates the required variables, mirrors the
-// result into process.env for any direct read, and feeds buildServer() through
-// its overrides seam so the Node adapter needs no changes.
-
 export const REQUIRED_VARS = ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY'];
+
+export class WorkerConfigurationError extends Error {
+  constructor(missing) {
+    super(`studybridge worker: missing required configuration: ${missing.join(', ')}`);
+    this.name = 'WorkerConfigurationError';
+  }
+}
 
 export function resolveWorkerEnv(bindings, baseEnv = {}) {
   const env = {};
@@ -24,10 +21,8 @@ export function resolveWorkerEnv(bindings, baseEnv = {}) {
 }
 
 export function assertRequired(env) {
-  const missing = REQUIRED_VARS.filter(name => !env[name]);
-  if (missing.length) {
-    throw new Error(`studybridge worker: missing required configuration: ${missing.join(', ')}`);
-  }
+  const missing = REQUIRED_VARS.filter(name => typeof env[name] !== 'string' || !env[name].trim());
+  if (missing.length) throw new WorkerConfigurationError(missing);
   return env;
 }
 
