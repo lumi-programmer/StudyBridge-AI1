@@ -193,6 +193,7 @@ export function createGateway(ctx) {
       daily_quota: config.quota,
       updated_at: now,
     };
+    let stored = provider;
     if (!current) {
       if (provider) {
         rows(await db.from('ai_providers').update(payload).eq('id', provider.id).select('id,provider_key'));
@@ -202,10 +203,13 @@ export function createGateway(ctx) {
           checked_at: null, created_at: now,
         }, { onConflict: 'provider_key' }).select('id,provider_key'));
       }
+      // Only a write can have changed the row; re-reading when nothing was
+      // written spends a subrequest on data already in hand — and subrequests
+      // are the one thing this runtime does not have to spare.
+      stored = rows(await db.from('ai_providers')
+        .select('id,provider_key,name,base_url,wire,key_hint,enabled,free_only,daily_quota,last_status,last_error,checked_at')
+        .eq('provider_key', config.providerKey).limit(1))?.[0] || null;
     }
-    const stored = rows(await db.from('ai_providers')
-      .select('id,provider_key,name,base_url,wire,key_hint,enabled,free_only,daily_quota,last_status,last_error,checked_at')
-      .eq('provider_key', config.providerKey).limit(1))?.[0];
     if (!stored) return null;
     // The routing model. A router is not priced itself: it picks a model per
     // request, and the model it picked is checked against the verified free
@@ -226,26 +230,28 @@ export function createGateway(ctx) {
       rows(await db.from('ai_models').update({ available: true, enabled: true, updated_at: now })
         .eq('id', router.id).eq('provider_id', stored.id).select('id'));
     }
-    await syncCentralCatalogue(stored, config);
-    const after = rows(await db.from('ai_providers')
+    const refreshed = await syncCentralCatalogue(stored, config);
+    // The refresh itself rewrites checked_at and last_status, so only a request
+    // that actually ran one needs the fresh row; otherwise `stored` is current.
+    if (!refreshed) return stored;
+    return rows(await db.from('ai_providers')
       .select('id,provider_key,name,base_url,wire,key_hint,enabled,free_only,daily_quota,last_status,last_error,checked_at')
-      .eq('provider_key', config.providerKey).limit(1))?.[0];
-    return after || stored;
+      .eq('provider_key', config.providerKey).limit(1))?.[0] || stored;
   }
 
-  // The catalogue is the evidence that a model's price is zero, so it is read
-  // from the provider itself rather than believed. It is refreshed daily, and
-  // sooner after a failed attempt.
+  // Returns true when a catalogue check actually ran (successfully or not), so
+  // the caller knows whether the provider row changed under it.
   async function syncCentralCatalogue(provider, config) {
     const checked = Date.parse(provider.checked_at || '');
     const age = Number.isFinite(checked) ? Date.now() - checked : Infinity;
-    if (provider.last_status === 'ok' ? age < CATALOGUE_TTL_MS : age < CATALOGUE_RETRY_MS) return;
+    if (provider.last_status === 'ok' ? age < CATALOGUE_TTL_MS : age < CATALOGUE_RETRY_MS) return false;
     try {
       await verifyPricing(provider.id);
     } catch (error) {
       await persistProviderStatus(provider, 'catalogue_failed',
         `The model catalogue could not be read: ${truncate(error?.hint || error?.message || 'no answer', 200)}`);
     }
+    return true;
   }
 
   // What the platform's free AI looks like right now: is it configured, is the
@@ -437,9 +443,14 @@ export function createGateway(ctx) {
       // A model that is cooling down after a rate limit is not asked again
       // until its window closes.
       if (cooling(model)) continue;
-      if (!usage.has(provider.provider_key)) usage.set(provider.provider_key, await providerUsageToday(provider.provider_key));
+      // Usage is only consulted when a quota can actually be exceeded; reading
+      // the ledger for a provider without one would spend a subrequest per
+      // routing pass for a number nothing ever compares.
       const quota = Number(provider.daily_quota) || 0;
-      if (quota > 0 && usage.get(provider.provider_key).used >= quota) continue;
+      if (quota > 0) {
+        if (!usage.has(provider.provider_key)) usage.set(provider.provider_key, await providerUsageToday(provider.provider_key));
+        if (usage.get(provider.provider_key).used >= quota) continue;
+      }
       out.push({
         model: {
           id: model.id,

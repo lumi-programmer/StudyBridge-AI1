@@ -1609,7 +1609,15 @@ export function createAi(ctx) {
     const { prompt, system = '', purpose = 'chat', spaceId = null, images = null,
       modelRowId = null, minTier = 1, needVision = false, style = 'simple', allowCache = false, message = '' } = options;
     await rateGate(ownerId);
-    let pool = await candidates(ownerId, { needVision, minTier: modelRowId ? 1 : minTier, modelRowId });
+    // The outer routing read exists only to decide whether the metered trial
+    // gate must run, and to seed a cache key when the caller wants one. Both
+    // are meaningless without a configured trial or a cache request, and every
+    // avoided read matters where the runtime caps subrequests per invocation —
+    // runPool re-reads routing anyway when the call actually goes out.
+    const trialConfigured = trialConfig().configured;
+    let pool = (trialConfigured || allowCache)
+      ? await candidates(ownerId, { needVision, minTier: modelRowId ? 1 : minTier, modelRowId })
+      : [];
     // The metered trial is gated whenever it is one of the candidates, not only
     // when it is the first one: the platform's free models now stand in front of it.
     const trial = pool.some(entry => entry.trial) ? trialConfig() : null;
