@@ -38,8 +38,9 @@ export default {
       const { built, handler } = await runtimeFor(env);
       if (!preloaded) {
         preloaded = true;
-        const preload = built.auth.preload();
-        if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(preload);
+        // Await on the first request: a cold isolate must not race the JWKS
+        // fetch and fail a signed-in request closed with a 503.
+        await built.auth.preload();
       }
       return await handler.fetch(request, env, ctx);
     } catch (error) {

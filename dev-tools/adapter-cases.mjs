@@ -529,16 +529,17 @@ async function storageAndAuthTests(t, fake) {
 
   const user = { sub: '11111111-1111-4111-8111-111111111111' };
   const esToken = es256Token(fake.ecPrivateKey, claimsFor(user.sub));
-  const verified = auth.verifyToken(esToken);
+  const verified = await auth.verifyToken(esToken);
   t.ok('N an ES256 token verifies against the JWKS', verified?.id === user.sub && verified?.email?.endsWith('@example.test'), verified);
 
   const rsToken = rs256Token(fake.rsaPrivateKey, claimsFor(user.sub));
-  t.ok('N an RS256 token verifies through its own kid', auth.verifyToken(rsToken)?.id === user.sub, auth.verifyToken(rsToken));
+  const rsVerified = await auth.verifyToken(rsToken);
+  t.ok('N an RS256 token verifies through its own kid', rsVerified?.id === user.sub, rsVerified);
 
   const badSig = es256Token(fake.ecPrivateKey, claimsFor(user.sub)).slice(0, -6) + 'Wrong!';
-  const rejected = [null, 'garbage', badSig, 'a.b.c'].map(token => {
-    try { auth.verifyToken(token); return 'accepted'; } catch (error) { return `${error.status}:${error.code}`; }
-  });
+  const rejected = await Promise.all([null, 'garbage', badSig, 'a.b.c'].map(async token => {
+    try { await auth.verifyToken(token); return 'accepted'; } catch (error) { return `${error.status}:${error.code}`; }
+  }));
   t.ok('N missing, malformed and tampered tokens all fail closed as 401',
     rejected.every(result => result === '401:login_required'), rejected);
 
@@ -546,26 +547,28 @@ async function storageAndAuthTests(t, fake) {
   const anon = es256Token(fake.ecPrivateKey, claimsFor(user.sub, { role: 'anon', aud: 'anon' }));
   const serviceRole = es256Token(fake.ecPrivateKey, claimsFor(user.sub, { role: 'service_role' }));
   const wrongAud = es256Token(fake.ecPrivateKey, claimsFor(user.sub, { aud: 'someone-else' }));
-  const claimChecks = [expired, anon, serviceRole, wrongAud].map(token => {
-    try { auth.verifyToken(token); return 'accepted'; } catch (error) { return `${error.status}:${error.code}`; }
-  });
+  const claimChecks = await Promise.all([expired, anon, serviceRole, wrongAud].map(async token => {
+    try { await auth.verifyToken(token); return 'accepted'; } catch (error) { return `${error.status}:${error.code}`; }
+  }));
   t.ok('N expired, anon, service_role and foreign-audience tokens are rejected',
     claimChecks.every(result => result === '401:login_required'), claimChecks);
 
   const unknownKid = es256Token(fake.ecPrivateKey, claimsFor(user.sub), 'rotated-away-key');
-  try { auth.verifyToken(unknownKid); t.ok('N an unknown key id fails closed', false, 'accepted'); }
+  try { await auth.verifyToken(unknownKid); t.ok('N an unknown key id fails closed', false, 'accepted'); }
   catch (error) { t.ok('N an unknown key id fails closed', error.status === 503 && error.code === 'auth_unavailable', error.code); }
 
   const hmacAuth = createSupabaseAuth({ url: fake.url, jwtSecret: JWT_SECRET });
   const hsToken = hs256Token(JWT_SECRET, claimsFor(user.sub));
-  t.ok('N an HS256 token verifies against the signing secret', hmacAuth.verifyToken(hsToken)?.id === user.sub, hmacAuth.verifyToken(hsToken));
+  const hsVerified = await hmacAuth.verifyToken(hsToken);
+  t.ok('N an HS256 token verifies against the signing secret', hsVerified?.id === user.sub, hsVerified);
   const hsWrong = hs256Token('another-secret', claimsFor(user.sub));
-  try { hmacAuth.verifyToken(hsWrong); t.ok('N a token signed with a foreign secret fails', false, 'accepted'); }
+  try { await hmacAuth.verifyToken(hsWrong); t.ok('N a token signed with a foreign secret fails', false, 'accepted'); }
   catch (error) { t.ok('N a token signed with a foreign secret fails', error.status === 401, error.code); }
 
   const request = new Request('http://server.test/api/bootstrap', { headers: { authorization: `Bearer ${hsToken}` } });
-  t.ok('N requireUser resolves the verified identity', hmacAuth.requireUser({ request })?.id === user.sub, hmacAuth.requireUser({ request }));
-  try { hmacAuth.requireUser({ request: new Request('http://server.test/api/bootstrap') }); t.ok('N requireUser refuses a missing header', false, 'accepted'); }
+  const resolved = await hmacAuth.requireUser({ request });
+  t.ok('N requireUser resolves the verified identity', resolved?.id === user.sub, resolved);
+  try { await hmacAuth.requireUser({ request: new Request('http://server.test/api/bootstrap') }); t.ok('N requireUser refuses a missing header', false, 'accepted'); }
   catch (error) { t.ok('N requireUser refuses a missing header', error.status === 401 && error.code === 'login_required', error.code); }
 }
 

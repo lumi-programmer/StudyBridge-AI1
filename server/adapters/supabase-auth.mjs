@@ -4,10 +4,11 @@
 //   HS256             → SUPABASE_JWT_SECRET (legacy signing secret)
 //   RS256/PS256/ES256 → the project JWKS (asymmetric signing keys)
 //
-// requireUser is called synchronously by the application factory, so the key
-// material must already be in memory: `preload()` fetches the JWKS before the
-// server accepts traffic, a background timer refreshes it, and a request whose
-// key id is unknown fails closed with a 503 while a refresh is triggered.
+// requireUser is async: the route handler awaits it on every authenticated
+// call. Key material must be in memory by then: `preload()` fetches the JWKS
+// before the server accepts traffic, a background timer refreshes it, and a
+// request whose key id is unknown fails closed with a 503 while a refresh is
+// triggered.
 //
 // A token only counts as a signed-in student when its signature verifies AND
 // its claims say so: a non-empty `sub`, `role: authenticated`, and an `aud`
@@ -19,7 +20,7 @@
 // owner_id mapping: the verified `sub` (the Supabase user id) becomes the
 // owner_id every table keys on — the same server-side ownership predicate the
 // routes already enforce.
-import { createHmac, createPublicKey, verify as nodeVerify, timingSafeEqual, constants } from 'node:crypto';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { BackendError } from '../backend-error.mjs';
 
 const LEWAY_MS = 30000;
@@ -40,18 +41,38 @@ function hmacVerified(signingInput, signature, secret) {
   return safeEqual(signature, expected);
 }
 
-function keyVerified(alg, signingInput, signature, keyObject) {
-  const data = Buffer.from(signingInput);
-  if (alg === 'RS256') return nodeVerify('sha256', data, keyObject, signature);
-  if (alg === 'PS256') {
-    return nodeVerify('sha256', data, { key: keyObject, padding: constants.RSA_PKCS1_PSS_PADDING, saltLength: 32 }, signature);
+// Asymmetric verification goes through WebCrypto, not node:crypto: the
+// Workers runtime's node:crypto shim rejects verify()'s option-object form
+// (ERR_INVALID_ARG_TYPE), while subtle.verify is native on Workers and Node
+// alike — and its ECDSA signature format, the raw r||s pair, is exactly what
+// Supabase emits.
+function importAlgorithmFor(alg, jwk) {
+  if (alg === 'ES256') return { name: 'ECDSA', namedCurve: jwk.crv || 'P-256' };
+  if (alg === 'RS256') return { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' };
+  return { name: 'RSA-PSS', hash: 'SHA-256' };
+}
+
+function verifyAlgorithmFor(alg) {
+  if (alg === 'ES256') return { name: 'ECDSA', hash: 'SHA-256' };
+  if (alg === 'RS256') return { name: 'RSASSA-PKCS1-v1_5' };
+  return { name: 'RSA-PSS', saltLength: 32 };
+}
+
+async function keyVerified(alg, signingInput, signature, jwk) {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) throw new BackendError('auth_unavailable', 503);
+  let key;
+  try {
+    key = await subtle.importKey('jwk', jwk, importAlgorithmFor(alg, jwk), false, ['verify']);
+  } catch {
+    throw new BackendError('auth_unavailable', 503);
   }
-  if (alg === 'ES256') {
-    // Supabase ES256 signatures are the raw r||s pair; node reads that form
-    // only with the ieee-p1363 encoding flag.
-    return nodeVerify('sha256', data, { key: keyObject, dsaEncoding: 'ieee-p1363' }, signature);
+  try {
+    return await subtle.verify(verifyAlgorithmFor(alg), key, signature, new TextEncoder().encode(signingInput));
+  } catch {
+    // A malformed or tampered signature is the caller's failure, not the key's.
+    return false;
   }
-  return false;
 }
 
 export function createSupabaseAuth({
@@ -115,7 +136,7 @@ export function createSupabaseAuth({
     return false;
   }
 
-  function verifyToken(token) {
+  async function verifyToken(token) {
     const parts = String(token || '').split('.');
     if (parts.length !== 3) throw new BackendError('login_required', 401);
     const [head64, body64, sig64] = parts;
@@ -146,13 +167,7 @@ export function createSupabaseAuth({
         if (!refreshInFlight) refreshInFlight = loadJwks().catch(() => {}).finally(() => { refreshInFlight = null; });
         throw new BackendError('auth_unavailable', 503);
       }
-      let keyObject;
-      try {
-        keyObject = createPublicKey({ key: jwk, format: 'jwk' });
-      } catch {
-        throw new BackendError('auth_unavailable', 503);
-      }
-      if (!keyVerified(alg, signingInput, signature, keyObject)) throw new BackendError('login_required', 401);
+      if (!(await keyVerified(alg, signingInput, signature, jwk))) throw new BackendError('login_required', 401);
     } else {
       throw new BackendError('login_required', 401);
     }
@@ -176,7 +191,7 @@ export function createSupabaseAuth({
     return { id: sub, name, email };
   }
 
-  function requireUser(requestContext) {
+  async function requireUser(requestContext) {
     const header = requestContext?.request?.headers?.get?.('authorization') || '';
     const match = /^Bearer\s+(.+)$/i.exec(header.trim());
     if (!match) throw new BackendError('login_required', 401);

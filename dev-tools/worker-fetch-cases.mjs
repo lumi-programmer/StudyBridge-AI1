@@ -122,15 +122,15 @@ export async function workerFetchTests(t) {
     const before = state.created;
     const worker = await freshWorker();
     t.ok('W actual entry imports without bindings, listening or outbound I/O', state.created === before && jwksCalls === 0);
+    releaseJwks();
     const health = await worker.fetch(request('/healthz'), bindings, ctx);
     const healthBody = await readJson(health);
     t.ok('W actual exported fetch accepts runtime bindings with empty process.env', health.status === 200 && healthBody.ok === true,
       { status: health.status, callableMismatch: healthBody.hint === 'handler is not a function' });
     t.ok('W runtime values are populated before the real server reaches the bridge', state.envReady);
-    t.ok('W JWKS preload is attached to waitUntil without blocking the first response', background.length === 1 && jwksCalls === 1);
-    releaseJwks();
-    await Promise.allSettled(background);
-    t.ok('W JWKS uses the runtime Supabase URL and anon binding', jwksCalls === 1 && jwksAuthorized);
+    t.ok('W the first request awaits the JWKS preload, so a cold isolate cannot serve the 503 race',
+      background.length === 0 && jwksCalls === 1);
+    t.ok('W JWKS uses the runtime Supabase URL and anon binding', jwksAuthorized);
 
     clearEnv();
     const retryWorker = await freshWorker();

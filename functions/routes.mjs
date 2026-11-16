@@ -238,7 +238,7 @@ export function application({ db, storage, requireUser, BackendError, envProvide
       if (route.method !== request.method) { methodMatched = true; continue; }
       const params = {};
       route.names.forEach((name, index) => { params[name] = decodeURIComponent(matched[index + 1]); });
-      const user = route.auth ? requireUser(requestContext) : null;
+      const user = route.auth ? await requireUser(requestContext) : null;
       const scoped = { ...requestContext, db, request, query, params, user, ...ctx };
       scoped.body = (maxBytes) => readJson(request, maxBytes);
       try {
