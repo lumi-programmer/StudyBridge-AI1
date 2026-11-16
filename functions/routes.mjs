@@ -297,6 +297,7 @@ const messages = {
   invalid_upload: 'That file was not accepted. Upload a PDF, PNG, JPEG, WebP or HEIC image.',
   upload_pending: 'The file has not finished uploading. Retry in a moment.',
   storage_unavailable: 'File storage is unavailable right now. Try again shortly.',
+  storage_object_not_found: 'That file is not in storage any more. Upload it again.',
   no_material: 'This action needs scanned page text first. Run the chapter scan, then try again.',
   extraction_failed: 'That page gave back no readable text. Retake the photo in better light or upload the PDF.',
   search_unavailable: 'The book lookup service did not answer. Add the title manually instead.',

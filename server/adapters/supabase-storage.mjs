@@ -92,6 +92,9 @@ export function createSupabaseStorage({
       : status === 409 ? 'already exists' : `storage_http_${status}`);
     error.code = status === 400 || status === 404 ? 'storage_object_not_found'
       : status === 409 ? 'storage_object_exists' : 'storage_unavailable';
+    // A dispatchable status keeps an unexpected storage failure a clean 503
+    // response instead of an uncaught throw with a raw code.
+    error.status = error.code === 'storage_object_exists' ? 409 : 503;
     return error;
   }
 

@@ -290,12 +290,20 @@ export function createLibrary({ add, db, fail, rows, storage, ai, rewards, verif
     const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(user.id));
     const ownerTag = [...new Uint8Array(digest)].slice(0, 8).map(b => b.toString(16).padStart(2, '0')).join('');
     const objectPath = `uploads/${ownerTag}/${id}/${safeName(input.file_name)}`;
+    // Sign before inserting: a missing bucket must not leave an orphan document row.
+    let signed;
+    try { signed = await storage.createSignedUploadUrl(objectPath, { upsert: false }); }
+    catch (error) {
+      if (error?.code === 'storage_object_not_found') {
+        fail('storage_unavailable', 503, `File storage is not ready on the server yet — the private "${storage.bucket || 'studybridge'}" bucket is missing in the storage project. An administrator can create it under Supabase → Storage (New bucket, name "${storage.bucket || 'studybridge'}", private), then uploads will work.`);
+      }
+      fail('storage_unavailable', 503);
+    }
     rows(await db.from('documents').insert({
       id, owner_id: user.id, book_id: bookId, space_id: spaceId, object_path: objectPath,
       file_name: safeName(input.file_name), kind, mime, size, stage, status: 'pending', extraction: {},
       created_at: nowIso(), updated_at: nowIso(),
     }));
-    const signed = await storage.createSignedUploadUrl(objectPath, { upsert: false });
     return Response.json({ document_id: id, object_path: objectPath, signed_url: signed.signedUrl || signed.signedURL, expires_in: 600, max_bytes: maxBytes }, { status: 201 });
   });
 

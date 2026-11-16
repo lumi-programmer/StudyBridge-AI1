@@ -278,6 +278,18 @@ export async function sectionLibrary(envIn, options = {}) {
   const notUploaded = await env.call('POST', '/api/uploads/prepare', { kind: 'image', mime: 'image/png', size: 100 });
   const pending = await env.call('POST', `/api/uploads/${notUploaded.json.document_id}/complete`);
   t.ok('missing object is upload_pending', pending.status === 409 && pending.json?.error === 'upload_pending', pending);
+
+  // A missing storage bucket must answer 503 storage_unavailable with guidance
+  // (this was a raw 500 storage_object_not_found before) and leave no row behind.
+  const realSign = env.storage.createSignedUploadUrl;
+  env.storage.createSignedUploadUrl = async () => { const error = new Error('not found'); error.code = 'storage_object_not_found'; throw error; };
+  let noBucket;
+  try { noBucket = await env.call('POST', '/api/uploads/prepare', { kind: 'image', mime: 'image/png', size: 100, file_name: 'no-bucket.png' }); }
+  finally { env.storage.createSignedUploadUrl = realSign; }
+  t.ok('missing bucket is storage_unavailable with guidance', noBucket.status === 503
+    && noBucket.json?.error === 'storage_unavailable' && /bucket/.test(noBucket.json?.hint || ''), noBucket.json);
+  t.ok('failed sign leaves no document row', !env.db.table('documents').find(item => item.file_name === 'no-bucket.png'));
+
   const docGet = await env.call('GET', `/api/documents/${doc.documentId}`);
   t.ok('document signed url', typeof docGet.json?.download_url === 'string', docGet.json);
 

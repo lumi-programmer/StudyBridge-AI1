@@ -538,7 +538,8 @@ async function storageAndAuthTests(t, fake) {
     && fetched.headers.get('content-type') === 'image/png', fetched.ok);
 
   const missing = await storage.download('uploads/tag/none.png').catch(error => error);
-  t.ok('N a missing object reports storage_object_not_found', missing?.code === 'storage_object_not_found', missing?.code);
+  t.ok('N a missing object reports storage_object_not_found with a dispatchable status',
+    missing?.code === 'storage_object_not_found' && missing?.status === 503, missing?.code);
 
   const get = await storage.createSignedUrl(objectPath, 60);
   const getRequest = new Request(`http://server.test${get.signedUrl}`, { method: 'GET' });

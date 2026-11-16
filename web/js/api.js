@@ -115,6 +115,9 @@ export const FALLBACK_MESSAGES = {
   method_not_allowed: 'That action is not allowed here.',
   invalid_input: 'Check the highlighted field and try again.',
   session_active: 'That session has already finished.',
+  upload_pending: 'The file has not finished uploading. Retry in a moment.',
+  storage_object_not_found: 'That file is not in storage any more. Upload it again.',
+  storage_unavailable: 'File storage is unavailable right now.',
 };
 
 export function messageFor(error) {
