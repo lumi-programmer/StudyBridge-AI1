@@ -22,6 +22,7 @@
   "compatibility_date": "2025-04-01",
   "compatibility_flags": ["nodejs_compat", "enable_nodejs_http_server_modules"],
   "vars": {
-    "SUPABASE_STORAGE_BUCKET": "studybridge"
+    "SUPABASE_STORAGE_BUCKET": "studybridge",
+    "SUPABASE_URL": "https://dtequykamvirlzifdkru.supabase.co"
   }
 }
