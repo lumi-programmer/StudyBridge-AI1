@@ -25,6 +25,10 @@ const CATALOGUE_MAX_ITEMS = 1000;
 // which left the gateway with zero prices and a cheerful "ok" — the limit is
 // now far above any catalogue a provider publishes.
 const CATALOGUE_MAX_BYTES = 8 * 1024 * 1024;
+// Catalogue rows go to the database in multi-row upserts of this size, not one
+// request per model: the Workers runtime allows only 50 subrequests per
+// invocation, and a real catalogue blows past that with per-row writes.
+const CATALOGUE_WRITE_CHUNK = 100;
 const PLATFORM_WIRES = new Set(['openai', 'openrouter', 'gemini']);
 
 // A model may only be selected when every one of these holds. It is one
@@ -592,6 +596,7 @@ export function createGateway(ctx) {
     const catalogue = await fetchCatalogue(provider, apiKey);
     const existing = new Map((await modelRows(providerId)).map(m => [m.model_id, m]));
     const seen = new Set();
+    const payloads = [];
     const report = [];
     for (const entry of catalogue.items) {
       const rawId = String(entry?.id || entry?.name || '');
@@ -635,12 +640,8 @@ export function createGateway(ctx) {
         payload.fail_streak = known.fail_streak || 0;
         payload.cooldown_until = known.cooldown_until || null;
         payload.cooldown_reason = known.cooldown_reason || '';
-        rows(await db.from('ai_models').update(payload).eq('id', known.id).eq('provider_id', providerId)
-          .select('id,model_id,free_tier,pricing_verified,available,enabled'));
-      } else {
-        rows(await db.from('ai_models').insertIfAbsent(payload, { onConflict: 'provider_id,model_id' })
-          .select('id,model_id,free_tier,pricing_verified,available,enabled'));
       }
+      payloads.push(payload);
       report.push({
         model_id: modelId,
         free: payload.free_tier,
@@ -651,6 +652,16 @@ export function createGateway(ctx) {
         enabled: payload.enabled,
       });
     }
+    // One upsert per chunk replaces one database request per model. The
+    // payload carries the identity a rerun must keep — an existing row's id,
+    // fail streak and cooldowns ride in the payload — so ON CONFLICT … DO
+    // UPDATE rewrites the row without orphaning anything that references it,
+    // and a several-hundred-model catalogue costs a handful of requests
+    // instead of several hundred (Workers allows 50 subrequests per call).
+    for (let start = 0; start < payloads.length; start += CATALOGUE_WRITE_CHUNK) {
+      rows(await db.from('ai_models').upsert(payloads.slice(start, start + CATALOGUE_WRITE_CHUNK), { onConflict: 'provider_id,model_id' })
+        .select('id,model_id,free_tier,pricing_verified,available,enabled'));
+    }
     // A model the provider no longer publishes is marked unavailable rather
     // than deleted, so its history stays readable. A router is left alone: it
     // is a routing option rather than a catalogue entry, and losing it from
@@ -660,13 +671,20 @@ export function createGateway(ctx) {
     // was cut short has not proved that a model is gone, and a model that is
     // still published must not be disabled because the read stopped early.
     if (!catalogue.truncated) {
-      for (const [modelId, row] of existing) {
-        if (seen.has(modelId)) continue;
-        if (row.router === true) continue;
-        rows(await db.from('ai_models').update({ available: false, enabled: false, updated_at: new Date().toISOString() })
-          .eq('id', row.id).eq('provider_id', providerId).select('id'));
+      const retired = [...existing.values()]
+        .filter(row => !seen.has(row.model_id) && row.router !== true)
+        .map(row => row.id);
+      const stamp = new Date().toISOString();
+      for (let start = 0; start < retired.length; start += CATALOGUE_WRITE_CHUNK) {
+        rows(await db.from('ai_models').update({ available: false, enabled: false, updated_at: stamp })
+          .in('id', retired.slice(start, start + CATALOGUE_WRITE_CHUNK))
+          .eq('provider_id', providerId).select('id'));
       }
     }
+    // The success stamp is written only after every chunk landed. A batch that
+    // fails throws before this line, so the provider keeps its failure status
+    // and the 15-minute retry comes back instead of the refresh being trusted
+    // for a whole day on a half-written catalogue.
     await db.from('ai_providers').update({
       last_status: 'ok', last_error: '', checked_at: new Date().toISOString(), updated_at: new Date().toISOString(),
     }).eq('id', providerId).select('id');

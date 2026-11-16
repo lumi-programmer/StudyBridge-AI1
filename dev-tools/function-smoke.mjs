@@ -18,6 +18,7 @@ function fakeDb() {
     table,
     rows: name => [...table(name)],
     dump: () => [...tables.entries()].map(([k, v]) => `${k}=${v.length}`).join(' '),
+    ops: [],
   };
 
   class Query {
@@ -44,6 +45,7 @@ function fakeDb() {
     single() { this.size = 1; this.returning = true; return this; }
     insert(values) { this.action = 'insert'; this.payload = values; return this; }
     insertIfAbsent(values, options) { this.action = 'insert_if_absent'; this.payload = values; this.conflict = options?.onConflict || ''; return this; }
+    upsert(values, options) { this.action = 'upsert'; this.payload = values; this.conflict = options?.onConflict || ''; return this; }
     update(values) { this.action = 'update'; this.payload = values; return this; }
     delete() { this.action = 'delete'; return this; }
     then(resolve, reject) {
@@ -67,7 +69,36 @@ function fakeDb() {
       return out;
     }
     run() {
+      ops.ops.push({
+        table: this.t,
+        action: this.action,
+        rows: Array.isArray(this.payload) ? this.payload.length : (this.payload ? 1 : null),
+      });
       const rowsIn = table(this.t);
+      if (this.action === 'upsert') {
+        // merge-duplicates: a row matching the conflict keys is rewritten in
+        // place, a row that does not is inserted — the ON CONFLICT DO UPDATE
+        // contract the batched catalogue writes rely on.
+        const incoming = Array.isArray(this.payload) ? this.payload : [this.payload];
+        const keys = this.conflict ? this.conflict.split(',').map(part => part.trim()).filter(Boolean) : ['id'];
+        const out = [];
+        for (const value of incoming) {
+          const row = { ...value };
+          const hit = keys.every(key => row[key] !== undefined)
+            && rowsIn.find(item => keys.every(key => item[key] === row[key]));
+          if (hit) {
+            Object.assign(hit, row);
+            out.push(this.project(hit));
+            continue;
+          }
+          if (row.id && rowsIn.some(item => item.id === row.id)) {
+            return { data: null, error: { code: 'duplicate_key', message: 'duplicate id' } };
+          }
+          rowsIn.push(row);
+          out.push(this.project(row));
+        }
+        return { data: out, error: null };
+      }
       if (this.action === 'insert' || this.action === 'insert_if_absent') {
         const value = { ...this.payload };
         if (this.action === 'insert_if_absent' && this.conflict) {

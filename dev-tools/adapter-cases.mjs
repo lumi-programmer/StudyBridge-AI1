@@ -2,7 +2,8 @@
 //
 // The fake Supabase in this file is a real HTTP server speaking the same wire
 // the production adapters speak: a PostgREST subset (select/filters/order/limit,
-// on_conflict with ignore-duplicates, representation returns, unique
+// on_conflict with ignore-duplicates and merge-duplicates (upsert),
+// representation returns, unique
 // constraints), the auth JWKS endpoint, the Storage object endpoints and the
 // AI catalogue/chat endpoints. Two levels are exercised:
 //
@@ -185,9 +186,16 @@ export function fakeSupabase(catalogueDouble) {
           const incoming = Array.isArray(body) ? body : [body];
           const onConflict = (url.searchParams.get('on_conflict') || '').split(',').map(part => part.trim()).filter(Boolean);
           const ignoreDuplicates = String(request.headers.prefer || '').includes('ignore-duplicates');
+          const mergeDuplicates = String(request.headers.prefer || '').includes('merge-duplicates');
           const inserted = [];
           for (const row of incoming) {
-            if (onConflict.length && ignoreDuplicates && rows.some(existing => onConflict.every(key => existing[key] === row[key]))) continue;
+            if (mergeDuplicates && onConflict.length) {
+              // merge-duplicates: ON CONFLICT … DO UPDATE — rewrite the matched
+              // row in place and return its representation.
+              const hit = rows.find(existing => onConflict.every(key => existing[key] === row[key]));
+              if (hit) { Object.assign(hit, row); inserted.push(hit); continue; }
+            } else if (onConflict.length && ignoreDuplicates
+              && rows.some(existing => onConflict.every(key => existing[key] === row[key]))) continue;
             const clashed = conflictKeysOf(table).some(({ keys }) =>
               rows.some(existing => keys.every(key => existing[key] === row[key])));
             if (clashed) return json(409, { code: '23505', message: 'duplicate key value violates unique constraint', details: null, hint: null });
@@ -456,6 +464,32 @@ async function adapterUnitTests(t, fake) {
     wire.some(call => String(call.url).includes('on_conflict=owner_id%2Creason'))
     && wire.some(call => String(call.init?.headers?.prefer || '').includes('ignore-duplicates')),
     wire.map(call => call.url.split('?')[1]).filter(Boolean).find(raw => raw.includes('on_conflict')));
+
+  // The batched catalogue write: many rows, one request, ON CONFLICT DO UPDATE.
+  const upsertOne = await db.from('ai_models').upsert([
+    { id: 'm1', provider_id: 'p1', model_id: 'a', display_name: 'A', free_tier: true, fail_streak: 0 },
+    { id: 'm2', provider_id: 'p1', model_id: 'b', display_name: 'B', free_tier: false, fail_streak: 0 },
+  ], { onConflict: 'provider_id,model_id' }).select('id,model_id,free_tier');
+  const upsertAgain = await db.from('ai_models').upsert([
+    { id: 'm1', provider_id: 'p1', model_id: 'a', display_name: 'A2', free_tier: false, fail_streak: 2 },
+    { id: 'm3', provider_id: 'p1', model_id: 'c', display_name: 'C', free_tier: true, fail_streak: 0 },
+  ], { onConflict: 'provider_id,model_id' }).select('id,model_id,display_name,free_tier,fail_streak');
+  const afterUpsert = await db.from('ai_models').select('*');
+  t.ok('N upsert writes a batch and returns the affected rows',
+    upsertOne.data?.length === 2 && upsertAgain.data?.length === 2, { one: upsertOne.data, again: upsertAgain.data });
+  t.ok('N upsert rewrites the conflicting row and keeps its id',
+    afterUpsert.data?.length === 3
+    && afterUpsert.data.some(row => row.id === 'm1' && row.display_name === 'A2' && row.fail_streak === 2),
+    afterUpsert.data);
+  t.ok('N upsert sends on_conflict and merge-duplicates',
+    wire.some(call => String(call.url).includes('on_conflict=provider_id%2Cmodel_id'))
+    && wire.some(call => String(call.init?.headers?.prefer || '').includes('merge-duplicates')),
+    wire.map(call => call.url.split('?')[1]).filter(Boolean).find(raw => raw.includes('provider_id%2Cmodel_id')));
+  const upsertWire = wire.filter(call => call.init?.method === 'POST' && String(call.url).includes('ai_models'));
+  t.ok('N each upsert batch travels as a single array body',
+    upsertWire.length === 2 && JSON.parse(upsertWire[0].init.body).length === 2
+    && JSON.parse(upsertWire[1].init.body).length === 2,
+    upsertWire.map(call => JSON.parse(call.init.body).length));
 
   fake.failNext(1);
   const failed = await db.from('wallets').select('id');

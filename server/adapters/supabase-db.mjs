@@ -34,6 +34,7 @@ export function createSupabaseDb({
       payload: null,
       onConflict: '',
       ignoreDuplicates: false,
+      mergeDuplicates: false,
     };
 
     const api = {
@@ -79,6 +80,17 @@ export function createSupabaseDb({
         state.ignoreDuplicates = true;
         return api;
       },
+      // ON CONFLICT … DO UPDATE: an existing row is rewritten, a new row is
+      // inserted, and the whole payload array travels as ONE request — the
+      // batched form the catalogue sync needs to stay inside the Workers
+      // subrequest limit.
+      upsert(values, options = {}) {
+        state.action = 'insert';
+        state.payload = values;
+        state.onConflict = options?.onConflict || '';
+        state.mergeDuplicates = true;
+        return api;
+      },
       update(values) {
         state.action = 'update';
         state.payload = values;
@@ -113,9 +125,11 @@ export function createSupabaseDb({
       if (method !== 'GET') {
         headers['content-type'] = 'application/json';
         headers['content-profile'] = schema;
-        headers['prefer'] = state.ignoreDuplicates
-          ? 'return=representation,resolution=ignore-duplicates'
-          : 'return=representation';
+        headers['prefer'] = state.mergeDuplicates
+          ? 'return=representation,resolution=merge-duplicates'
+          : state.ignoreDuplicates
+            ? 'return=representation,resolution=ignore-duplicates'
+            : 'return=representation';
       }
       let response;
       try {

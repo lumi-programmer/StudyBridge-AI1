@@ -2924,6 +2924,114 @@ export async function sectionPhase2() {
       (await env.call('GET', '/api/wallet')).json?.balance === (login.json?.balance || 30) - 2, null);
   }
 
+  // ---- M24: a 320-model catalogue is written in 4 batched upserts ----------
+  //
+  // The Cloudflare Workers runtime allows 50 subrequests per invocation. The
+  // catalogue sync used to spend one database request per model, so a real
+  // OpenRouter catalogue blew the budget mid-loop and every bootstrap failed
+  // with database_unavailable. The writes now travel as chunked multi-row
+  // upserts: a handful of requests, no matter how large the catalogue grows.
+  {
+    const catalogue = { data: [
+      ...FREE_CATALOGUE.data,
+      ...Array.from({ length: 318 }, (_, index) => ({
+        id: `vendor/bulk-model-${String(index).padStart(3, '0')}`,
+        name: `Bulk Model ${index}`,
+        pricing: { prompt: '0', completion: '0' },
+        context_length: 4096,
+      })),
+    ] };
+    const double = gatewayDouble(catalogue, { models: { [FREE_FIRST]: { content: 'ok' } } });
+    const { env } = await centralEnv(double);
+    const shell = await env.call('GET', '/api/bootstrap');
+    const central = shell.json?.free_models?.central;
+    t.ok('M24 a 321-model catalogue verifies with HTTP 200', shell.status === 200
+      && central?.last_status === 'ok', central);
+    t.ok('M24 every model the provider published landed in the table',
+      env.db.table('ai_models').filter(row => row.router !== true).length === 321,
+      env.db.table('ai_models').length);
+    const chunks = env.db.ops.filter(op => op.table === 'ai_models' && op.action === 'upsert');
+    t.ok('M24 the catalogue rows were written as 4 batched upserts',
+      chunks.length === 4 && chunks.reduce((sum, op) => sum + op.rows, 0) === 321,
+      chunks.map(op => op.rows));
+    t.ok('M24 no catalogue row was written one request at a time',
+      env.db.ops.filter(op => op.table === 'ai_models' && op.action !== 'upsert'
+        && op.action !== 'select' && op.action !== 'insert_if_absent').length === 0,
+      env.db.ops.filter(op => op.table === 'ai_models'));
+  }
+
+  // ---- M25: a re-verify keeps model identity, streaks and cooldowns ---------
+  //
+  // The batched upsert carries an existing row's id, fail streak and cooldown
+  // in its payload, so ON CONFLICT … DO UPDATE rewrites the row without
+  // orphaning its history or resetting its cooling-off period.
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, { models: { [FREE_FIRST]: { content: 'ok' } } });
+    const { env } = await centralEnv(double);
+    await env.call('GET', '/api/bootstrap');
+    const provider = env.db.table('ai_providers').filter(row => row.provider_key === 'openrouter-central')[0];
+    const before = env.db.table('ai_models').filter(row => row.model_id === FREE_FIRST)[0];
+    before.fail_streak = 3;
+    before.cooldown_until = '2099-01-01T00:00:00.000Z';
+    before.cooldown_reason = 'testing cooldown preservation';
+    const verified = await env.call('POST', `/api/admin/providers/${provider.id}/verify`);
+    const rows = env.db.table('ai_models').filter(row => row.model_id === FREE_FIRST);
+    t.ok('M25 the re-verify succeeds', verified.status === 200, verified.json);
+    t.ok('M25 the verified model still occupies exactly one row', rows.length === 1, rows.length);
+    const after = rows[0];
+    t.ok('M25 the row keeps its id across the upsert',
+      Boolean(after) && after.id === before.id, { before: before.id, after: after?.id });
+    t.ok('M25 the fail streak and cooldown survive the refresh',
+      after?.fail_streak === 3 && after?.cooldown_until === '2099-01-01T00:00:00.000Z'
+      && after?.cooldown_reason === 'testing cooldown preservation', after);
+    t.ok('M25 the refreshed pricing is intact beside the preserved state',
+      after?.pricing_verified === true && after?.available === true && after?.enabled === true, after);
+  }
+
+  // ---- M26: a failed batch never stamps the refresh as successful -----------
+  //
+  // If a batch write fails, verifyPricing throws before the provider's
+  // last_status/checked_at are stamped "ok". On the bootstrap path the sync
+  // wrapper records catalogue_failed so the 15-minute retry comes back; on the
+  // admin verify path the error surfaces to the operator and the previous
+  // stamp stands untouched — a half-written catalogue is never trusted.
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, { models: { [FREE_FIRST]: { content: 'ok' } } });
+    const { env } = await centralEnv(double);
+    await env.call('GET', '/api/bootstrap');
+    const provider = env.db.table('ai_providers').filter(row => row.provider_key === 'openrouter-central')[0];
+    const stampBefore = { last_status: provider.last_status, checked_at: provider.checked_at, updated_at: provider.updated_at };
+    const realFrom = env.db.from;
+    let poisoned = true;
+    env.db.from = name => {
+      const query = realFrom(name);
+      const realUpsert = query.upsert.bind(query);
+      query.upsert = (...args) => {
+        const out = realUpsert(...args);
+        if (poisoned) {
+          poisoned = false;
+          query.run = () => ({ data: null, error: { code: 'database_error', status: 500, message: 'the batch failed' } });
+        }
+        return out;
+      };
+      return query;
+    };
+    const failed = await env.call('POST', `/api/admin/providers/${provider.id}/verify`);
+    t.ok('M26 a failed batch fails the verify request',
+      failed.status === 503 && failed.json?.error === 'database_unavailable', failed);
+    t.ok('M26 the failed attempt left the successful refresh stamp untouched',
+      provider.last_status === stampBefore.last_status && provider.checked_at === stampBefore.checked_at
+      && provider.updated_at === stampBefore.updated_at,
+      { before: stampBefore, after: { last_status: provider.last_status, checked_at: provider.checked_at, updated_at: provider.updated_at } });
+    const retry = await env.call('POST', `/api/admin/providers/${provider.id}/verify`);
+    t.ok('M26 the retry after the failed batch completes and stamps ok fresh',
+      retry.status === 200 && provider.last_status === 'ok' && provider.checked_at !== stampBefore.checked_at,
+      { status: retry.status, checked_at: provider.checked_at, before: stampBefore.checked_at });
+    t.ok('M26 the retried refresh wrote the whole catalogue',
+      env.db.table('ai_models').filter(row => row.router !== true).length === 3,
+      env.db.table('ai_models').length);
+  }
+
   return { env: null, report: t.summary() };
 }
 
