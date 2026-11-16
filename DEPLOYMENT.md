@@ -51,19 +51,29 @@ signed-URL storage).
    granted to `service_role` only) and the atomic-credits functions. Nothing is
    destructive; re-running against an existing schema fails rather than partially
    applying.
-3. Run `supabase/verify/verify_migration.sql` **afterwards** in the SQL Editor.
+3. Expose the `app` schema on the Data API: under *Integrations → Data API →
+   Settings → Exposed schemas* include `app` alongside `public` and
+   `graphql_public`. The backend adapters address every table through PostgREST
+   with the `Accept-Profile: app` / `Content-Profile: app` headers; a project
+   that leaves the schema unexposed answers every query with `406 PGRST106:
+   Invalid schema: app`, which the API edge reports as `database_unavailable`.
+   The migration's privilege wall still applies after exposure — `anon` and
+   `authenticated` keep no schema or table privileges (probes answer `42501
+   permission denied`), and Row Level Security remains the boundary for
+   `service_role`.
+4. Run `supabase/verify/verify_migration.sql` **afterwards** in the SQL Editor.
    It is read-only except for one transactional smoke test that ends in
    `ROLLBACK`, so it leaves nothing behind. Section 12 simulates an
    authenticated attacker with a single PL/pgSQL `DO` block and expects every
    probe to fail with SQLSTATE 42501. Read its header first: the editor's
    pooler can route consecutive statements to different backends, which is why
    the simulation is one statement rather than many.
-4. Storage → **New bucket**: name it `studybridge` (or set
+5. Storage → **New bucket**: name it `studybridge` (or set
    `SUPABASE_STORAGE_BUCKET` on Render to match) and leave **public access
    OFF**. Every object is written and read by the Render backend through
    server-issued, short-lived signed capability URLs; a bucket that is public
    defeats that entirely.
-5. Authentication: email/password sign-up stays enabled (the default). Under
+6. Authentication: email/password sign-up stays enabled (the default). Under
    *Authentication → URL Configuration* set the **Site URL** to the Pages
    domain once it exists, and add that domain under Redirect URLs — the
    password-reset email link opens the site there with a one-time session
