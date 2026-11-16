@@ -1,0 +1,1 @@
+{"version": 1, "include": ["/functions/v1/app/*", "/storage/*"], "exclude": []}

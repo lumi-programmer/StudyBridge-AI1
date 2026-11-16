@@ -1,7 +1,0 @@
-# Cloudflare Pages proxy — keeps API and storage requests same-origin with the
-# static app. 200 = proxy/rewrite, the client URL never changes. Order matters:
-# Pages applies the first matching rule. No secret values belong in this file.
-# The Worker also serves these paths directly (verified live /healthz 200).
-
-/functions/v1/app/* https://studybridge-ai-final.zainabshoaib496.workers.dev/functions/v1/app/:splat 200
-/storage/* https://studybridge-ai-final.zainabshoaib496.workers.dev/storage/:splat 200
