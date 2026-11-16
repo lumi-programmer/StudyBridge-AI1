@@ -74,15 +74,19 @@ async function route() {
   if (typeof cleanup === 'function') { try { cleanup(); } catch { /* view already gone */ } }
   cleanup = null;
 
-  if (!store.boot) {
-    await loadBootstrap();
-    if (token !== renderToken) return;
-  }
-  if (store.status === 'error' && !store.boot) {
-    clear(view).appendChild(h('div', { class: 'boot-state' },
-      errorCard(store.error, () => loadBootstrap(true).then(route)),
-      h('p', { class: 'tiny muted', text: 'Your data is safe — the study bridge could not be reached just now.' })));
-    return;
+  // The sign-in view renders no store data: booting behind it would 401 for
+  // every signed-out visitor and strand them on the retry panel, not the form.
+  if (name !== 'login') {
+    if (!store.boot) {
+      await loadBootstrap();
+      if (token !== renderToken) return;
+    }
+    if (store.status === 'error' && !store.boot) {
+      clear(view).appendChild(h('div', { class: 'boot-state' },
+        errorCard(store.error, () => loadBootstrap(true).then(route)),
+        h('p', { class: 'tiny muted', text: 'Your data is safe — the study bridge could not be reached just now.' })));
+      return;
+    }
   }
   // A name that is not a section is its own answer. Rendering the dashboard
   // behind an unknown URL hides a typo or a stale bookmark as a real page.
