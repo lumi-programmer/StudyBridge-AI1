@@ -11,7 +11,7 @@ import { emptyState, errorCard, errorToast, field, h, num, pageHead, spinner, ti
 const HEALTH_TONE = { ok: 'green', auth_failed: 'rose', failed: 'rose', unreachable: 'rose', no_key: 'amber', no_model: 'amber', untested: 'grey' };
 
 export async function render(root, { navigate }) {
-  root.appendChild(pageHead('Administration', 'AI economy & provider control',
+  root.appendChild(pageHead('🛡️ Administration', 'AI economy & provider control',
     'Only server-side administrators reach this page. It reads recorded rows and writes the price table, the reward amounts and the provider registry.',
     [h('a', { class: 'btn secondary', href: '#/wallet', text: 'Bridge Wallet' })]));
   const body = h('div', { class: 'stack' });

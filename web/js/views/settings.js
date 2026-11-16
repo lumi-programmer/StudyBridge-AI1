@@ -10,7 +10,7 @@ const LEVELS = [['beginner', 'Total beginner'], ['simple', 'Simple'], ['school',
 const NOTIFS = [['daily_goal', 'Daily goal reminder'], ['daily_question', 'Daily question reminder'], ['breaks', 'Break reminders'], ['challenges', 'Challenge reminders'], ['streak', 'Streak reminders']];
 
 export async function render(root, { navigate }) {
-  root.appendChild(pageHead('Settings', 'Your setup', 'Preferences, AI providers you connect yourself, and the data you can delete at any time. Free tools keep working with no provider at all.'));
+  root.appendChild(pageHead('⚙️ Settings', 'Your setup', 'Preferences, AI providers you connect yourself, and the data you can delete at any time. Free tools keep working with no provider at all.'));
   const body = h('div', { class: 'stack' });
   root.appendChild(body);
   const boot = store.boot;

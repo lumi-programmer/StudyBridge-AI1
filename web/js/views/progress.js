@@ -4,7 +4,7 @@ import { emptyState, errorCard, h, minutesLabel, num, pct, pageHead, timeAgo } f
 import { barChart, heatmap, meter, ring } from '../charts.js';
 
 export async function render(root, { navigate }) {
-  root.appendChild(pageHead('My Progress', 'What you have actually done', 'Study minutes come from finished focus sessions, accuracy from graded quiz answers, chapters from your own status marks. Nothing here is a projection.'));
+  root.appendChild(pageHead('📊 My Progress', 'What you have actually done', 'Study minutes come from finished focus sessions, accuracy from graded quiz answers, chapters from your own status marks. Nothing here is a projection.'));
   const body = h('div', { class: 'stack' });
   root.appendChild(body);
   let p;

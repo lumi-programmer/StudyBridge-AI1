@@ -22,7 +22,7 @@ export async function render(root, { query }) {
   let current = query.get('chapter') ? 'chapter' : (query.get('stage') || 'cover');
   let bookId = query.get('book') || books[0]?.id || '';
 
-  root.appendChild(pageHead('Smart Scanner', 'Scan your textbook', 'Photograph a cover, index the contents, then bring in the pages you are actually studying. A PDF with a text layer is read exactly; a photograph goes through a vision model and you proofread it.',
+  root.appendChild(pageHead('📷 Smart Scanner', 'Scan your textbook', 'Photograph a cover, index the contents, then bring in the pages you are actually studying. A PDF with a text layer is read exactly; a photograph goes through a vision model and you proofread it.',
     [books.length ? h('select', { 'aria-label': 'Book', onChange: e => { bookId = e.value; show(current); } }, books.map(b => h('option', { value: b.id, selected: b.id === bookId }, b.title))) : null,
       h('a', { class: 'btn secondary', href: '#/library', text: 'My library' })]));
 

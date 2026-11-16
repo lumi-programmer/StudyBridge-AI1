@@ -10,7 +10,7 @@ export async function render(root, { args, navigate }) {
 }
 
 async function bookList(root, { navigate }) {
-  root.appendChild(pageHead('My Library', 'Your books', 'Everything here is a book you scanned or typed yourself. StudyBridge never fills a library from a cover picture.',
+  root.appendChild(pageHead('📚 My Library', 'Your books', 'Everything here is a book you scanned or typed yourself. StudyBridge never fills a library from a cover picture.',
     [h('a', { class: 'btn', href: '#/scanner', text: 'Scan a book' }), h('button', { class: 'btn secondary', type: 'button', text: 'Add by hand', onClick: () => bookForm(null, b => navigate(`#/library/${b.id}`)) })]));
   const search = h('input', { type: 'search', placeholder: 'Search title, author, subject…', 'aria-label': 'Search library' });
   const subject = h('input', { type: 'text', placeholder: 'Subject filter', 'aria-label': 'Subject filter' });

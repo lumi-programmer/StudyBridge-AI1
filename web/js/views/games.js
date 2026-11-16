@@ -8,7 +8,7 @@ const BLANK = 'unanswered';
 
 export async function render(root, { navigate }) {
   let active = null;
-  root.appendChild(pageHead('Game Center', 'Brain games', 'Always open — no study session required first. Rewards are capped daily so they cannot be farmed, and each score is checked against the puzzle the server issued.',
+  root.appendChild(pageHead('🎮 Game Center', 'Brain games', 'Always open — no study session required first. Rewards are capped daily so they cannot be farmed, and each score is checked against the puzzle the server issued.',
     [h('a', { class: 'btn secondary', href: '#/wallet', text: 'My wallet' })]));
   const board = h('div', { class: 'stack' });
   root.appendChild(board);
@@ -24,8 +24,8 @@ export async function render(root, { navigate }) {
     const ruleOf = game => (data.rules || []).find(r => r.game === game) || null;
     board.replaceChildren(
       h('section', { class: 'card row wrap-gap caps' },
-        h('span', { class: 'tag amber', text: `${data.today.credits_earned} BC earned today` }),
-        h('span', { class: 'tag grey', text: `${data.today.rounds} round${data.today.rounds === 1 ? '' : 's'} played` }),
+        h('span', { class: 'tag amber', text: `💎 ${data.today.credits_earned} BC earned today` }),
+        h('span', { class: 'tag grey', text: `🎮 ${data.today.rounds} round${data.today.rounds === 1 ? '' : 's'} played` }),
         h('span', { class: 'tag teal', text: `${data.today.reward_rounds_left} rewarded round${data.today.reward_rounds_left === 1 ? '' : 's'} left (cap ${data.today.daily_cap} BC/day)` }),
         h('small', { class: 'muted tiny', text: data.note })),
       h('div', { class: 'grid cols-4' }, data.games.map(game => h('article', { class: 'card game-card' },
@@ -75,7 +75,7 @@ function play(game, difficulty, rules, navigate, previousClose, reload) {
         refresh().catch(() => { /* the result sheet already carries the server’s numbers */ });
         reload?.();
         view.showResult(res, game, navigate);
-        toast(`${res.score} points${res.credits_earned ? ` · +${res.credits_earned} BC` : ''}.`, res.credits_earned ? 'good' : '');
+        toast(`${res.score} points${res.credits_earned ? ` · +${res.credits_earned} BC 💎` : ''}.`, res.credits_earned ? 'good' : '');
       }).catch(error => {
         finished = false;
         if (btn) { btn.disabled = false; btn.textContent = 'Submit answers'; }
@@ -97,7 +97,7 @@ function resultBanner(res, game) {
       h('span', { text: `${res.credits_earned ? `+${res.credits_earned} BC. ` : ''}Best at ${game.name}: ${num(res.best_score)} · wallet ${num(res.balance)} BC.` }))),
     res.note ? h('div', { class: 'banner warn' }, h('div', {}, h('b', { text: 'No credits this round' }), h('span', { text: res.note }))) : null,
     res.cap_note ? h('div', { class: 'banner info' }, h('div', {}, h('b', { text: 'Daily limit' }), h('span', { text: res.cap_note }))) : null,
-    res.achievement ? h('div', { class: 'banner good' }, h('div', {}, h('b', { text: `Achievement: ${res.achievement.title}` }), h('span', { text: `+${res.achievement.reward} BC — once only.` }))) : null,
+    res.achievement ? h('div', { class: 'banner good' }, h('div', {}, h('b', { text: `🏆 Achievement: ${res.achievement.title}` }), h('span', { text: `+${res.achievement.reward} BC 💎 — once only.` }))) : null,
     h('details', {}, h('summary', { class: 'tiny', text: 'Review the answers' }),
       (res.feedback || []).map(fb => h('div', { class: `fb ${fb.ok ? 'ok' : 'no'}` },
         h('b', { class: 'tiny', text: fb.prompt ? `Q${(fb.index ?? 0) + 1}` : `Round ${fb.round}` }),

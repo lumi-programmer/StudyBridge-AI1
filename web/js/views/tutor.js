@@ -82,7 +82,7 @@ export async function render(root, { query, navigate }) {
   let spaces = [];
   try { spaces = await api.get('/api/spaces'); } catch { spaces = []; }
   if (!spaces.length) {
-    root.appendChild(pageHead('AI Tutor', 'Pick a space first', 'The tutor only reads the books linked to the space you are in, so one subject never leaks into another.'));
+    root.appendChild(pageHead('🤖 AI Tutor', 'Pick a space first', 'The tutor only reads the books linked to the space you are in, so one subject never leaks into another.'));
     root.appendChild(emptyState('No spaces yet', 'Create a space, link a scanned book, then ask away.',
       h('a', { class: 'btn', href: '#/spaces?new=1', text: 'Create a space' })));
     return;
@@ -97,7 +97,7 @@ export async function render(root, { query, navigate }) {
   let modelRowId = '';
   const modelSel = h('select', { 'aria-label': 'Model', onChange: e => { modelRowId = e.value; } });
 
-  root.appendChild(pageHead('AI Tutor', 'Ask about this space', tutorIntro(),
+  root.appendChild(pageHead('🤖 AI Tutor', 'Ask about this space', tutorIntro(),
     [h('a', { class: 'btn secondary', href: `#/spaces/${spaceId}`, text: 'Open space' })]));
   const balanceChip = h('span', { class: 'tag amber', text: `${num(store.boot?.wallet?.balance ?? 0)} BC` });
   const costChip = h('span', { class: 'tag grey', text: `${priceOf('basic_question')} BC per question` });

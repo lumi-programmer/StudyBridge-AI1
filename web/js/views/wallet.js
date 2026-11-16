@@ -24,7 +24,7 @@ const TYPE_LABEL = {
 };
 
 export async function render(root, { navigate }) {
-  root.appendChild(pageHead('Bridge Wallet', 'Bridge Credits', 'BC are in-app reward points earned from real study — never money, never API quota, and never editable from the browser. Basic study tools always stay free at zero credits.',
+  root.appendChild(pageHead('💎 Bridge Wallet', 'Bridge Credits', 'BC are in-app reward points earned from real study — never money, never API quota, and never editable from the browser. Basic study tools always stay free at zero credits.',
     [h('a', { class: 'btn secondary', href: '#/rewards', text: 'Rewards Center' })]));
   const body = h('div', { class: 'stack' });
   root.appendChild(body);

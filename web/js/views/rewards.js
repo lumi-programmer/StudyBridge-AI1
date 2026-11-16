@@ -6,7 +6,7 @@ import { emptyState, errorCard, h, num, pageHead, untilLabel } from '../ui.js';
 import { loginRewardButton } from './shared.js';
 
 export async function render(root, { navigate }) {
-  root.appendChild(pageHead('Rewards Center', 'Earn Bridge Credits',
+  root.appendChild(pageHead('🌟 Rewards Center', 'Earn Bridge Credits',
     'Bridge Credits are earned from real study activity and spent on AI requests. The server checks the underlying record before it pays anything, so a reward can only be earned once per period.',
     [h('a', { class: 'btn secondary', href: '#/wallet', text: 'Bridge Wallet' })]));
   const body = h('div', { class: 'stack' });

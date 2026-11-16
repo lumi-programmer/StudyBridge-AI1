@@ -52,10 +52,10 @@ function png(width, height, rgba) {
 
 // ---------- the artwork, in the favicon's 64x64 coordinate space ----------
 const hex = s => [1, 3, 5].map(i => parseInt(s.slice(i, i + 2), 16));
-const INDIGO_A = hex('#3b3ec4');
-const INDIGO_B = hex('#23256e');
-const CREAM = hex('#f6e4c4');
-const TEAL = hex('#0f7a72');
+const INDIGO_A = hex('#8b5cf6');
+const INDIGO_B = hex('#5b21b6');
+const CREAM = hex('#e9e3fd');
+const TEAL = hex('#c4b5fd');
 const ROUNDING = 15; // rx of the favicon's rounded square
 
 function cubic(p0, p1, p2, p3, t) {

@@ -1,12 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="StudyBridge">
   <defs>
     <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#3b3ec4"/>
-      <stop offset="1" stop-color="#23256e"/>
+      <stop offset="0" stop-color="#8b5cf6"/>
+      <stop offset="1" stop-color="#5b21b6"/>
     </linearGradient>
   </defs>
   <rect width="64" height="64" rx="15" fill="url(#g)"/>
-  <path d="M8 40c9-14 16-14 24 0 8-14 15-14 24 0" fill="none" stroke="#f6e4c4" stroke-width="5" stroke-linecap="round"/>
-  <path d="M12 46h40" stroke="#0f7a72" stroke-width="4" stroke-linecap="round"/>
-  <path d="M20 46v-8M32 46v-11M44 46v-8" stroke="#0f7a72" stroke-width="3.4" stroke-linecap="round"/>
+  <path d="M8 40c9-14 16-14 24 0 8-14 15-14 24 0" fill="none" stroke="#e9e3fd" stroke-width="5" stroke-linecap="round"/>
+  <path d="M12 46h40" stroke="#c4b5fd" stroke-width="4" stroke-linecap="round"/>
+  <path d="M20 46v-8M32 46v-11M44 46v-8" stroke="#c4b5fd" stroke-width="3.4" stroke-linecap="round"/>
 </svg>

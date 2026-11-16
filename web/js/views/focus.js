@@ -1,5 +1,6 @@
 // Focus Mode — the timer is the server's, the browser only displays it.
 import { api } from '../api.js';
+import { store } from '../store.js';
 import { clock, confirmSheet, emptyState, errorToast, field, h, num, openSheet, pageHead, select, sheetTitle, spinner, timeAgo, toast } from '../ui.js';
 import { meter, ring } from '../charts.js';
 import { MODE_LABEL, current, discardSession, elapsedSeconds, finishSession, onFocus, remainingSeconds, run, startSession } from '../focus.js';
@@ -12,7 +13,7 @@ const MODES = [
 const PRESETS = [25, 50];
 
 export async function render(root, { navigate }) {
-  root.appendChild(pageHead('Focus Mode', 'Study with a real timer', 'Minutes are measured on the server clock, so a refresh or a closed tab cannot invent study time. Sessions of 10 minutes or more earn 15 BC, up to two a day — shorter ones still count as progress.',
+  root.appendChild(pageHead('🎯 Focus Mode', 'Study with a real timer', 'Minutes are measured on the server clock, so a refresh or a closed tab cannot invent study time. Sessions of 10 minutes or more earn 15 BC, up to two a day — shorter ones still count as progress.',
     [h('a', { class: 'btn secondary', href: '#/progress', text: 'See my progress' })]));
 
   const left = h('div', { class: 'stack' });
@@ -22,6 +23,7 @@ export async function render(root, { navigate }) {
   let mode = 'deep';
   const planWrap = h('div', { class: 'row wrap-gap' });
   const customInput = h('input', { type: 'number', min: '1', max: '240', value: '45', 'aria-label': 'Custom minutes', style: { maxWidth: '110px' } });
+  customInput.addEventListener('input', () => { planned = Math.min(240, Math.max(1, Number(customInput.value) || 45)); });
   let planned = 25;
   const spaceSel = h('select', { 'aria-label': 'Space' });
   api.get('/api/spaces').then(spaces => {
@@ -39,7 +41,6 @@ export async function render(root, { navigate }) {
     if (mode !== 'custom') {
       for (const b of planWrap.querySelectorAll('.preset')) b.classList.toggle('on', b.textContent === `${planned} min`);
     }
-    customInput.addEventListener('input', () => { planned = Math.min(240, Math.max(1, Number(customInput.value) || 45)); });
   }
 
   const modeCards = h('div', { class: 'mode-grid' }, MODES.map(([key, title, blurb]) => h('button', {
@@ -138,15 +139,16 @@ export async function render(root, { navigate }) {
 
 function showResult(result, navigate) {
   const credits = (result.awarded || []).reduce((acc, a) => acc + (a.amount || a.awarded?.reward || a.reward || 0), 0);
+  const goalTarget = store.boot?.profile?.daily_goal_minutes;
   const close = openSheet(h('div', { class: 'stack' },
-    sheetTitle('Session saved', `${result.minutes} minutes of real study recorded`),
+    sheetTitle('Session saved 🎉', `${result.minutes} minutes of real study recorded`),
     result.reward_note ? h('div', { class: 'banner info' }, h('div', {}, h('b', { text: 'No credits this time' }), h('span', { text: result.reward_note }))) : null,
     result.cap_note ? h('div', { class: 'banner info' }, h('div', {}, h('b', { text: 'Daily cap' }), h('span', { text: result.cap_note }))) : null,
     h('div', { class: 'grid cols-3' },
       h('div', { class: 'stat' }, h('span', { class: 'stat-label', text: 'Minutes' }), h('b', { text: String(result.minutes) })),
-      h('div', { class: 'stat amber' }, h('span', { class: 'stat-label', text: 'Credits' }), h('b', { text: `+${credits}` }), h('small', { text: credits ? 'added to your wallet' : 'nothing earned this round' })),
-      h('div', { class: 'stat teal' }, h('span', { class: 'stat-label', text: 'Streak' }), h('b', { text: String(result.streak?.current ?? 0) }), h('small', { text: 'days in a row' }))),
-    result.goal ? h('p', { class: 'tiny muted', text: `Today’s goal: ${result.goal.minutes_today} of ${result.goal.done ? 'reached' : 'on the way'} minutes.` }) : null,
+      h('div', { class: 'stat amber' }, h('span', { class: 'stat-label', text: 'Credits' }), h('b', { text: `+${credits}` }), h('small', { text: credits ? 'added to your wallet 💎' : 'nothing earned this round' })),
+      h('div', { class: 'stat teal' }, h('span', { class: 'stat-label', text: 'Streak' }), h('b', { text: `🔥 ${result.streak?.current ?? 0}` }), h('small', { text: 'days in a row' }))),
+    result.goal ? h('p', { class: 'tiny muted', text: `🎯 Today’s goal: ${result.goal.minutes_today} of ${goalTarget ?? '—'} minutes recorded — ${result.goal.done ? 'goal reached!' : 'on the way'}.` }) : null,
     h('div', { class: 'row end' },
       h('button', { class: 'btn secondary', type: 'button', text: 'Close', onClick: () => close() }),
       h('a', { class: 'btn', href: '#/progress', text: 'See progress', onClick: () => close() }))));

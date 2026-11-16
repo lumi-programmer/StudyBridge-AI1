@@ -10,7 +10,7 @@ const MILESTONES = [
 ];
 
 export async function render(root, { navigate }) {
-  root.appendChild(pageHead('Daily Streaks', 'Keep the chain alive', 'A streak counts any day you studied, answered the daily question or claimed your login. Skip a day and the count restarts — but nothing is taken away and no day is marked as a failure.',
+  root.appendChild(pageHead('🔥 Daily Streaks', 'Keep the chain alive', 'A streak counts any day you studied, answered the daily question or claimed your login. Skip a day and the count restarts — but nothing is taken away and no day is marked as a failure.',
     [h('a', { class: 'btn secondary', href: '#/focus', text: 'Start a session' })]));
   const body = h('div', { class: 'stack' });
   root.appendChild(body);

@@ -30,13 +30,13 @@ export async function render(root, { navigate }) {
 
   const timer = current();
   const stats = h('div', { class: 'grid cols-4' },
-    stat('Bridge Credits', num(store.boot.wallet?.balance), 'amber', 'Reward points, never money', '#/wallet'),
-    stat('Day streak', num(daily.streak?.current || 0), 'rose', `Longest ${daily.streak?.longest || 0} days`, '#/streak'),
-    stat('Studied today', minutesLabel(daily.minutesToday), 'teal', `Goal ${daily.goalMinutes} min`, '#/progress'),
-    stat('Quizzes taken', num(boot.totals?.quizzes || 0), '', `${num(boot.totals?.sessions || 0)} focus sessions`, '#/progress'));
+    stat('💎 Bridge Credits', num(store.boot.wallet?.balance), 'amber', 'Reward points, never money', '#/wallet'),
+    stat('🔥 Day streak', num(daily.streak?.current || 0), 'rose', `Longest ${daily.streak?.longest || 0} days`, '#/streak'),
+    stat('⏱️ Studied today', minutesLabel(daily.minutesToday), 'teal', `Goal ${daily.goalMinutes} min`, '#/progress'),
+    stat('📝 Quizzes taken', num(boot.totals?.quizzes || 0), '', `${num(boot.totals?.sessions || 0)} focus sessions`, '#/progress'));
 
   const goal = h('section', { class: 'card' },
-    h('div', { class: 'card-head' }, h('h3', { text: 'Today’s goal' }), h('span', { class: 'spacer' }),
+    h('div', { class: 'card-head' }, h('h3', { text: '🎯 Today’s goal' }), h('span', { class: 'spacer' }),
       daily.goalDone ? h('span', { class: 'tag green', text: 'Goal reached · +20 BC' }) : h('span', { class: 'tag amber', text: '+20 BC when reached' })),
     meter(daily.minutesToday, daily.goalMinutes, { tone: daily.goalDone ? 'good' : '' }),
     h('p', { class: 'tiny muted', style: { margin: '8px 0 12px' },
@@ -46,7 +46,7 @@ export async function render(root, { navigate }) {
       : h('a', { class: 'btn block', href: '#/focus', text: 'Start a focus session' }));
 
   const challenge = h('section', { class: 'card' },
-    h('div', { class: 'card-head' }, h('h3', { text: 'Challenges' })),
+    h('div', { class: 'card-head' }, h('h3', { text: '🏆 Challenges' })),
     h('div', { class: 'challenge' },
       h('div', {}, h('b', { text: 'Daily' }), h('p', { class: 'tiny muted', text: daily.dailyChallenge })),
       daily.dailyChallengeDone ? h('span', { class: 'tag green', text: 'Done · +15' }) : h('span', { class: 'tag amber', text: '+15 BC' })),
@@ -56,26 +56,26 @@ export async function render(root, { navigate }) {
       daily.weekly.done ? h('span', { class: 'tag green', text: 'Done · +50' }) : h('span', { class: 'tag amber', text: '+50 BC' })));
 
   const quick = h('section', { class: 'card' },
-    h('div', { class: 'card-head' }, h('h3', { text: 'Start something' })),
+    h('div', { class: 'card-head' }, h('h3', { text: '✨ Start something' })),
     h('div', { class: 'quick-grid' },
-      quickLink('#/scanner', '⌗', 'Scan a page', 'Cover, contents or a chapter'),
-      quickLink('#/tutor', '✦', 'Ask the tutor', 'Answers cite your scans'),
+      quickLink('#/scanner', '📷', 'Scan a page', 'Cover, contents or a chapter'),
+      quickLink('#/tutor', '🤖', 'Ask the tutor', 'Answers cite your scans'),
       quickLink('#/library', '📚', 'Open library', `${boot.books.length ? `${boot.books.length}+ books` : 'Add your first book'}`),
-      quickLink('#/games', '✧', 'Brain break', '8 quick games, always open')));
+      quickLink('#/games', '🎮', 'Brain break', '8 quick games, always open')));
 
   const reminderCard = reminders.items?.length ? h('section', { class: 'card card-flat' },
-    h('div', { class: 'card-head' }, h('h3', { text: 'Gentle reminders' })),
+    h('div', { class: 'card-head' }, h('h3', { text: '💡 Gentle reminders' })),
     h('ul', { class: 'list-plain reminder-list' }, reminders.items.map(item => h('li', { class: `rem rem-${item.tone}`, text: item.text })))) : null;
 
   const spaces = h('section', { class: 'card' },
-    h('div', { class: 'card-head' }, h('h3', { text: 'Recent spaces' }), h('span', { class: 'spacer' }), h('a', { href: '#/spaces', class: 'tiny', text: 'All spaces' })),
+    h('div', { class: 'card-head' }, h('h3', { text: '🗂️ Recent spaces' }), h('span', { class: 'spacer' }), h('a', { href: '#/spaces', class: 'tiny', text: 'All spaces' })),
     boot.spaces.length
       ? h('ul', { class: 'list-plain link-list' }, boot.spaces.map(s => h('li', {},
         h('a', { href: `#/spaces/${s.id}` }, colorDot(s.color), h('span', { text: s.name }), h('small', { class: 'muted', text: s.subject || '' }), h('small', { class: 'muted push', text: timeAgo(s.updated_at) })))))
       : emptyState('No spaces yet', 'A space keeps one subject’s notes, books and tutor chat together.', h('a', { class: 'btn sm', href: '#/spaces?new=1', text: 'Create a space' })));
 
   const books = h('section', { class: 'card' },
-    h('div', { class: 'card-head' }, h('h3', { text: 'Recent books' }), h('span', { class: 'spacer' }), h('a', { href: '#/library', class: 'tiny', text: 'Library' })),
+    h('div', { class: 'card-head' }, h('h3', { text: '📚 Recent books' }), h('span', { class: 'spacer' }), h('a', { href: '#/library', class: 'tiny', text: 'Library' })),
     boot.books.length
       ? h('ul', { class: 'list-plain link-list' }, boot.books.map(b => h('li', {},
         h('a', { href: `#/library/${b.id}` }, h('span', { class: 'book-spine', 'aria-hidden': 'true' }), h('span', { text: b.title }), h('small', { class: 'muted', text: b.author || b.subject || '' })))))
@@ -100,7 +100,7 @@ function freeAiCard(boot) {
     : central.quota_blocked ? h('span', { class: 'tag amber', text: 'busy right now' })
     : h('span', { class: 'tag rose', text: 'not answering yet' });
   return h('section', { class: 'card' },
-    h('div', { class: 'card-head' }, h('h3', { text: 'StudyBridge Free AI' }), h('span', { class: 'spacer' }), state),
+    h('div', { class: 'card-head' }, h('h3', { text: '🤖 StudyBridge Free AI' }), h('span', { class: 'spacer' }), state),
     h('p', { class: 'tiny', style: { margin: '0 0 8px' }, text: 'AI access is centrally managed by StudyBridge. You do not need to provide your own API key.' }),
     h('div', { class: 'grid cols-2' },
       h('div', { class: 'stat teal' }, h('span', { class: 'stat-label', text: 'Questions left today' }),

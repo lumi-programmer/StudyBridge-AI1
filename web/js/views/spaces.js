@@ -14,7 +14,7 @@ export async function render(root, { args, query, navigate }) {
 async function list(root, { query, navigate }) {
   let archived = query.get('archived') === 'true';
   const newBtn = h('button', { class: 'btn', type: 'button', text: 'New space', onClick: () => spaceForm(null, created => navigate(`#/spaces/${created.id}`)) });
-  root.appendChild(pageHead('My Spaces', 'Spaces', 'One space per subject or exam. Each keeps its own notes, saved questions, books and tutor chat — nothing leaks between spaces.', [newBtn]));
+  root.appendChild(pageHead('🗂️ My Spaces', 'Spaces', 'One space per subject or exam. Each keeps its own notes, saved questions, books and tutor chat — nothing leaks between spaces.', [newBtn]));
   const tabs = h('div', { class: 'tabs', role: 'tablist' });
   const body = h('div', {});
   root.append(tabs, body);
