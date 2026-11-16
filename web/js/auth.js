@@ -33,6 +33,33 @@ function authHeaders(extra = {}) {
   return { apikey: config.supabaseAnonKey, ...extra };
 }
 
+// Supabase reports auth failures in two shapes — the classic { error,
+// error_description } pair and the newer { error_code, msg }. Students get
+// plain-language words instead of provider phrasing, tests get a stable code.
+const AUTH_MESSAGES = {
+  invalid_credentials: 'That email and password don’t match an existing account. Check your password, or create an account below.',
+  invalid_grant: 'That email and password don’t match an existing account. Check your password, or create an account below.',
+  user_already_exists: 'This account already exists. Please log in instead.',
+  email_not_confirmed: 'This email is not confirmed yet. Check your inbox for the confirmation link, then sign in.',
+  over_request_rate_limit: 'Too many attempts just now. Wait a minute and try again.',
+  over_email_send_rate_limit: 'Too many emails just now. Wait a minute and try again.',
+  user_banned: 'This account is unavailable right now.',
+  signup_disabled: 'New sign-ups are switched off at the moment. Please try again later.',
+};
+
+export function authError(payload, fallbackCode = 'auth_failed') {
+  const code = String(payload?.error || payload?.error_code || fallbackCode);
+  const error = new Error(AUTH_MESSAGES[code] || payload?.error_description || payload?.msg || 'Sign-in failed. Please try again.');
+  error.code = code;
+  return error;
+}
+
+function networkError() {
+  const error = new Error('The account service could not be reached. Check your connection and try again.');
+  error.code = 'network_unreachable';
+  return error;
+}
+
 // Email links must return to the deployment the student is on. The site root
 // is the app's only callback — the one-time-session fragment is adopted there
 // on any route (adoptRecoveryTokens), so the redirect URL carries no hash.
@@ -41,17 +68,18 @@ function redirectFor() {
 }
 
 async function grant(path, body, init = {}) {
-  const response = await fetch(`${config.supabaseUrl}/auth/v1/${path}`, {
-    method: 'POST',
-    headers: authHeaders({ 'content-type': 'application/json', ...(init.headers || {}) }),
-    body: JSON.stringify(body),
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error = new Error(payload?.error_description || payload?.msg || payload?.error || 'auth_failed');
-    error.code = String(payload?.error || 'auth_failed');
-    throw error;
+  let response;
+  try {
+    response = await fetch(`${config.supabaseUrl}/auth/v1/${path}`, {
+      method: 'POST',
+      headers: authHeaders({ 'content-type': 'application/json', ...(init.headers || {}) }),
+      body: JSON.stringify(body),
+    });
+  } catch {
+    throw networkError();
   }
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw authError(payload);
   return payload;
 }
 
@@ -99,16 +127,18 @@ export async function signIn(email, password) {
 
 export async function signUp(email, password) {
   if (!configured) throw new Error('auth_not_configured');
-  const payload = await fetch(`${config.supabaseUrl}/auth/v1/signup`, {
-    method: 'POST',
-    headers: authHeaders({ 'content-type': 'application/json' }),
-    body: JSON.stringify({ email, password, email_redirect_to: redirectFor() }),
-  }).then(response => response.json().then(body => ({ ok: response.ok, status: response.status, body })));
-  if (!payload.ok) {
-    const error = new Error(payload.body?.msg || payload.body?.error_description || payload.body?.error || 'signup_failed');
-    error.code = String(payload.body?.error || 'signup_failed');
-    throw error;
+  let response;
+  try {
+    response = await fetch(`${config.supabaseUrl}/auth/v1/signup`, {
+      method: 'POST',
+      headers: authHeaders({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ email, password, email_redirect_to: redirectFor() }),
+    });
+  } catch {
+    throw networkError();
   }
+  const payload = await response.json().then(body => ({ ok: response.ok, body })).catch(() => ({ ok: response.ok, body: {} }));
+  if (!payload.ok) throw authError(payload.body, 'signup_failed');
   if (payload.body?.access_token) {
     const next = sessionOf(payload.body);
     next.name = next.name || email.split('@')[0];
@@ -146,16 +176,19 @@ export function hasSession() {
 // address belongs to an account — the email itself is the only signal.
 export async function requestPasswordReset(email) {
   if (!configured) throw new Error('auth_not_configured');
-  const response = await fetch(`${config.supabaseUrl}/auth/v1/recover`, {
-    method: 'POST',
-    headers: authHeaders({ 'content-type': 'application/json' }),
-    body: JSON.stringify({ email, email_redirect_to: redirectFor() }),
-  });
+  let response;
+  try {
+    response = await fetch(`${config.supabaseUrl}/auth/v1/recover`, {
+      method: 'POST',
+      headers: authHeaders({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ email, email_redirect_to: redirectFor() }),
+    });
+  } catch {
+    throw networkError();
+  }
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
-    const error = new Error(payload?.error_description || payload?.msg || payload?.error || 'recover_failed');
-    error.code = String(payload?.error || 'recover_failed');
-    throw error;
+    throw authError(payload, 'recover_failed');
   }
   return { ok: true };
 }
@@ -203,16 +236,17 @@ export function consumeRecovery() {
 export async function updatePassword(password) {
   if (!configured) throw new Error('auth_not_configured');
   if (!session?.access_token) throw new Error('login_required');
-  const response = await fetch(`${config.supabaseUrl}/auth/v1/user`, {
-    method: 'PUT',
-    headers: authHeaders({ authorization: `Bearer ${session.access_token}`, 'content-type': 'application/json' }),
-    body: JSON.stringify({ password }),
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error = new Error(payload?.msg || payload?.error_description || payload?.error || 'update_failed');
-    error.code = String(payload?.error || 'update_failed');
-    throw error;
+  let response;
+  try {
+    response = await fetch(`${config.supabaseUrl}/auth/v1/user`, {
+      method: 'PUT',
+      headers: authHeaders({ authorization: `Bearer ${session.access_token}`, 'content-type': 'application/json' }),
+      body: JSON.stringify({ password }),
+    });
+  } catch {
+    throw networkError();
   }
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw authError(payload, 'update_failed');
   return { ok: true, email: payload?.email || session?.email || '' };
 }

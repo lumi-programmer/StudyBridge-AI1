@@ -3035,4 +3035,153 @@ export async function sectionPhase2() {
   return { env: null, report: t.summary() };
 }
 
+// ---- section O: sign-in and registration error handling ---------------------
+// Regression net for the auth bug. The browser's sign-in button must reach the
+// Supabase password grant (never the signup endpoint), duplicate sign-ups must
+// steer the student back to sign-in with the friendly wording, and every
+// failure must carry a stable code plus plain-language words — never raw
+// provider phrasing or a bare network TypeError.
+export async function sectionAuthUi() {
+  const t = tracker();
+  const originalFetch = globalThis.fetch;
+  const originalStorage = globalThis.localStorage;
+  const originalWindow = globalThis.window;
+  const originalLocation = globalThis.location;
+  const fakeStorage = (() => {
+    const map = new Map();
+    return {
+      getItem: k => (map.has(k) ? map.get(k) : null),
+      setItem: (k, v) => { map.set(k, String(v)); },
+      removeItem: k => { map.delete(k); },
+    };
+  })();
+  const AUTH_KEY = 'studybridge.auth';
+
+  const sessionPayload = (access, refresh) => ({
+    access_token: access, refresh_token: refresh, expires_in: 3600,
+    user: { email: 'student@studybridge.test', user_metadata: { full_name: 'Test Student' } },
+  });
+
+  try {
+    globalThis.localStorage = fakeStorage;
+    globalThis.window = { __STUDYBRIDGE_CONFIG__: { supabaseUrl: 'https://auth.test', supabaseAnonKey: 'anon-for-tests' } };
+    globalThis.location = { origin: 'https://studybridge.test' };
+    const auth = await import('../web/js/auth.js');
+
+    const calls = [];
+    const scriptedFetch = routes => async (url, init) => {
+      calls.push({ url: String(url), body: init?.body ? JSON.parse(init.body) : null });
+      const route = routes.shift() || { status: 500, body: { msg: 'unexpected auth call' } };
+      return new Response(JSON.stringify(route.body), { status: route.status, headers: { 'content-type': 'application/json' } });
+    };
+
+    // O1 — wrong password on an existing account: accurate words, no session,
+    // and the request went to the sign-in grant, not registration.
+    calls.length = 0;
+    globalThis.fetch = scriptedFetch([{ status: 400, body: { code: 400, error_code: 'invalid_credentials', msg: 'Invalid login credentials' } }]);
+    let wrongPassword = null;
+    try { await auth.signIn('student@studybridge.test', 'not-the-password'); }
+    catch (error) { wrongPassword = error; }
+    t.ok('O1 the wrong password fails', Boolean(wrongPassword), wrongPassword);
+    t.ok('O1 sign-in reaches the password grant, never /signup',
+      calls.length === 1 && calls[0].url === 'https://auth.test/auth/v1/token?grant_type=password', calls[0]?.url);
+    t.ok('O1 the grant carries the typed credentials',
+      calls[0]?.body?.email === 'student@studybridge.test' && calls[0]?.body?.password === 'not-the-password', calls[0]?.body);
+    t.ok('O1 the failure keeps a stable code', wrongPassword?.code === 'invalid_credentials', wrongPassword?.code);
+    t.ok('O1 the student sees guidance, not the raw provider text',
+      wrongPassword?.message === 'That email and password don’t match an existing account. Check your password, or create an account below.',
+      wrongPassword?.message);
+    t.ok('O1 a failed sign-in stores no session', localStorage.getItem(AUTH_KEY) === null, localStorage.getItem(AUTH_KEY));
+    t.ok('O1 a failed sign-in leaves the app signed out', auth.hasSession() === false, null);
+
+    // O2 — duplicate sign-up: the exact friendly wording, pointing at sign-in.
+    calls.length = 0;
+    globalThis.fetch = scriptedFetch([{ status: 422, body: { code: 422, error_code: 'user_already_exists', msg: 'User already registered' } }]);
+    let duplicate = null;
+    try { await auth.signUp('student@studybridge.test', 'Another-Password-9'); }
+    catch (error) { duplicate = error; }
+    t.ok('O2 signing up an existing email fails', Boolean(duplicate), duplicate);
+    t.ok('O2 the attempt went to the signup endpoint', calls.length === 1 && calls[0].url === 'https://auth.test/auth/v1/signup', calls[0]?.url);
+    t.ok('O2 no second account is created client-side', localStorage.getItem(AUTH_KEY) === null, localStorage.getItem(AUTH_KEY));
+    t.ok('O2 the message is the friendly duplicate wording',
+      duplicate?.message === 'This account already exists. Please log in instead.', duplicate?.message);
+    t.ok('O2 the code is stable for the UI switch-to-sign-in action', duplicate?.code === 'user_already_exists', duplicate?.code);
+
+    // O3 — an unconfirmed account gets pointed at its inbox, not a dead end.
+    globalThis.fetch = scriptedFetch([{ status: 400, body: { code: 400, error_code: 'email_not_confirmed', msg: 'Email not confirmed' } }]);
+    let unconfirmed = null;
+    try { await auth.signIn('student@studybridge.test', 'whatever-1'); }
+    catch (error) { unconfirmed = error; }
+    t.ok('O3 an unconfirmed email explains the confirmation step',
+      unconfirmed?.code === 'email_not_confirmed' && /confirmation link/i.test(unconfirmed?.message || ''), unconfirmed?.message);
+
+    // O4 — the classic GoTrue error shape still maps to friendly words.
+    globalThis.fetch = scriptedFetch([{ status: 400, body: { error: 'invalid_grant', error_description: 'Invalid credentials' } }]);
+    let classic = null;
+    try { await auth.signIn('student@studybridge.test', 'whatever-1'); }
+    catch (error) { classic = error; }
+    t.ok('O4 the classic error shape keeps its code', classic?.code === 'invalid_grant', classic?.code);
+    t.ok('O4 the classic shape gets the same friendly words',
+      classic?.message === 'That email and password don’t match an existing account. Check your password, or create an account below.', classic?.message);
+
+    // O5 — a dead network never shows the browser's raw TypeError.
+    globalThis.fetch = async () => { throw new TypeError('Failed to fetch'); };
+    let offline = null;
+    try { await auth.signIn('student@studybridge.test', 'whatever-1'); }
+    catch (error) { offline = error; }
+    t.ok('O5 an unreachable account service says so plainly',
+      offline?.code === 'network_unreachable'
+      && offline?.message === 'The account service could not be reached. Check your connection and try again.', offline?.message);
+
+    // O6 — a correct password signs in, stores the session and restores it.
+    calls.length = 0;
+    globalThis.fetch = scriptedFetch([{ status: 200, body: sessionPayload('access-token-1', 'refresh-token-1') }]);
+    const signedIn = await auth.signIn('student@studybridge.test', 'Real-Password-1');
+    const stored = JSON.parse(localStorage.getItem(AUTH_KEY) || 'null');
+    t.ok('O6 a correct password signs the student in', signedIn?.ok === true && signedIn?.email === 'student@studybridge.test', signedIn);
+    t.ok('O6 the session is stored for the next visit', Boolean(stored?.access_token && stored?.refresh_token), stored);
+    t.ok('O6 the stored session carries the student email', stored?.email === 'student@studybridge.test', stored?.email);
+    t.ok('O6 the app reports a live session', auth.hasSession() === true, null);
+    t.ok('O6 the access token is served from the session', (await auth.getAccessToken()) === 'access-token-1', null);
+
+    // O7 — an expiring session refreshes itself with the stored refresh token.
+    globalThis.fetch = scriptedFetch([{ status: 200, body: sessionPayload('access-token-2', 'refresh-token-2') }]);
+    await auth.refresh();
+    t.ok('O7 the session refreshes from the stored refresh token', (await auth.getAccessToken()) === 'access-token-2', null);
+    t.ok('O7 the refresh token rotates in storage',
+      JSON.parse(localStorage.getItem(AUTH_KEY) || 'null')?.refresh_token === 'refresh-token-2', null);
+
+    // O8 — sign-up with a fresh address and confirmation off signs straight in.
+    calls.length = 0;
+    globalThis.fetch = scriptedFetch([{ status: 200, body: sessionPayload('access-token-3', 'refresh-token-3') }]);
+    const fresh = await auth.signUp('newstudent@studybridge.test', 'Fresh-Password-1');
+    t.ok('O8 a new account signs straight in when confirmation is off',
+      fresh?.ok === true && fresh?.confirmation_required === false, fresh);
+    t.ok('O8 the stored session switched to the fresh tokens',
+      JSON.parse(localStorage.getItem(AUTH_KEY) || 'null')?.access_token === 'access-token-3', null);
+    t.ok('O8 the registration reached the signup endpoint', calls[0]?.url === 'https://auth.test/auth/v1/signup', calls[0]?.url);
+
+    // O9 — confirmation-on projects get the check-your-email branch instead.
+    globalThis.fetch = scriptedFetch([{ status: 200, body: { user: { email: 'pending@studybridge.test' } } }]);
+    const pending = await auth.signUp('pending@studybridge.test', 'Pending-Password-1');
+    t.ok('O9 no session from the provider becomes confirmation_required', pending?.confirmation_required === true, pending);
+    t.ok('O9 the confirmation branch does not store a session for the pending user',
+      JSON.parse(localStorage.getItem(AUTH_KEY) || 'null')?.access_token === 'access-token-3', null);
+
+    // O10 — sign-out clears the browser session and reaches the logout endpoint.
+    calls.length = 0;
+    globalThis.fetch = scriptedFetch([{ status: 204, body: {} }]);
+    await auth.signOut();
+    t.ok('O10 sign-out clears the stored session', localStorage.getItem(AUTH_KEY) === null && auth.hasSession() === false, null);
+    t.ok('O10 the provider was told the token is spent', calls[0]?.url === 'https://auth.test/auth/v1/logout', calls[0]?.url);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalStorage === undefined) delete globalThis.localStorage; else globalThis.localStorage = originalStorage;
+    if (originalWindow === undefined) delete globalThis.window; else globalThis.window = originalWindow;
+    if (originalLocation === undefined) delete globalThis.location; else globalThis.location = originalLocation;
+  }
+
+  return { env: null, report: t.summary() };
+}
+
 export { tracker, makeAiFetch, pdfWith, pngBytes, upload, uuid, gatewayDouble, FREE_CATALOGUE, FREE_FIRST };
