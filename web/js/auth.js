@@ -33,6 +33,13 @@ function authHeaders(extra = {}) {
   return { apikey: config.supabaseAnonKey, ...extra };
 }
 
+// Email links must return to the deployment the student is on. The site root
+// is the app's only callback — the one-time-session fragment is adopted there
+// on any route (adoptRecoveryTokens), so the redirect URL carries no hash.
+function redirectFor() {
+  return `${location.origin}/`;
+}
+
 async function grant(path, body, init = {}) {
   const response = await fetch(`${config.supabaseUrl}/auth/v1/${path}`, {
     method: 'POST',
@@ -95,7 +102,7 @@ export async function signUp(email, password) {
   const payload = await fetch(`${config.supabaseUrl}/auth/v1/signup`, {
     method: 'POST',
     headers: authHeaders({ 'content-type': 'application/json' }),
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email, password, email_redirect_to: redirectFor() }),
   }).then(response => response.json().then(body => ({ ok: response.ok, status: response.status, body })));
   if (!payload.ok) {
     const error = new Error(payload.body?.msg || payload.body?.error_description || payload.body?.error || 'signup_failed');
@@ -142,7 +149,7 @@ export async function requestPasswordReset(email) {
   const response = await fetch(`${config.supabaseUrl}/auth/v1/recover`, {
     method: 'POST',
     headers: authHeaders({ 'content-type': 'application/json' }),
-    body: JSON.stringify({ email }),
+    body: JSON.stringify({ email, email_redirect_to: redirectFor() }),
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
