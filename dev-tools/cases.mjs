@@ -1920,6 +1920,27 @@ function ledgerSum(rows) {
   return rows.reduce((sum, row) => sum + (row.direction === 'earn' ? row.amount : -row.amount), 0);
 }
 
+// Test-only top-up so an allowance run can afford fifty priced questions. A
+// ledger-consistent earn keeps every balance assertion summing to the truth.
+async function grantCredits(env, ownerId, amount) {
+  await env.call('GET', '/api/wallet');
+  const wallet = env.db.table('wallets').find(row => row.owner_id === ownerId);
+  if (wallet) { wallet.balance += amount; wallet.earned += amount; }
+  env.db.table('transactions').push({
+    id: uuid(), owner_id: ownerId, direction: 'earn', amount,
+    balance_after: wallet ? wallet.balance : amount,
+    reason: 'test_topup', label: 'Test allowance top-up', created_at: new Date().toISOString(),
+  });
+}
+
+// The pace guard counts ai_usage rows in the last minute, and the daily
+// counter counts ai_daily_slots instead — so sliding usage history back in
+// time dodges the pace guard without touching the day total.
+function ageUsage(env) {
+  for (const row of env.db.table('ai_usage')) row.created_at = new Date(new Date(row.created_at).getTime() - 120000).toISOString();
+}
+
+
 export async function sectionAcceptance() {
   const t = tracker();
 
@@ -1932,7 +1953,7 @@ export async function sectionAcceptance() {
     t.ok('L1 a new student has no transaction history', Array.isArray(wallet.json?.history) && wallet.json.history.length === 0, wallet.json?.history);
     t.ok('L1 the price of a basic AI question is published as 2', wallet.json?.rates?.spend?.basic_question === 2, wallet.json?.rates?.spend);
     t.ok('L1 the daily login reward is published as 30', wallet.json?.rates?.earn?.login === 30, wallet.json?.rates?.earn);
-    t.ok('L1 the daily request limit is published', wallet.json?.limits?.daily_questions_per_student === 10, wallet.json?.limits);
+    t.ok('L1 the daily request limit is published', wallet.json?.limits?.daily_questions_per_student === 50, wallet.json?.limits);
   }
 
   // ---- L2: the daily login pays exactly 30 ----------------------------------
@@ -2500,7 +2521,7 @@ export async function sectionPhase2() {
     const wallet = await env.call('GET', '/api/wallet');
     t.ok('M3 a failed request deducts 0 BC', wallet.json?.balance === before, { before, after: wallet.json?.balance });
     t.ok('M3 a failed request consumes no daily allowance', wallet.json?.daily_ai?.used === 0
-      && wallet.json?.daily_ai?.remaining === 10, wallet.json?.daily_ai);
+      && wallet.json?.daily_ai?.remaining === 50, wallet.json?.daily_ai);
     t.ok('M3 the ledger holds no net charge', ledgerOf(env, 'student-a')
       .filter(row => row.direction === 'spend').length
       === ledgerOf(env, 'student-a').filter(row => String(row.reason).startsWith('refund:')).length,
@@ -2525,25 +2546,29 @@ export async function sectionPhase2() {
       claims[0]?.period === dayOfIso(claims[0]?.created_at), claims[0]);
   }
 
-  // ---- M5: the daily allowance is exactly ten successful questions ----------
+  // ---- M5: the daily allowance is exactly fifty successful questions --------
   {
     const double = gatewayDouble(FREE_CATALOGUE, { models: { [FREE_FIRST]: { content: 'ok' } } });
     const { env, spaceId } = await centralEnv(double);
     const login = await env.call('POST', '/api/daily/login');
-    const before = login.json?.balance;
+    await grantCredits(env, 'student-a', 300);
+    const before = login.json?.balance + 300;
     let answered = 0;
-    for (let index = 0; index < 10; index += 1) {
+    for (let index = 0; index < 50; index += 1) {
+      // The pace guard rejects a machine-gun burst, not the allowance: age the
+      // usage history every eight questions to keep this an allowance test.
+      if (index % 8 === 0) ageUsage(env);
       const chat = await env.call('POST', `/api/spaces/${spaceId}/chat`, { message: `question ${index}`, client_key: uuid() });
       if (chat.status === 200) answered += 1;
     }
-    t.ok('M5 ten questions are answered', answered === 10, answered);
-    const eleventh = await env.call('POST', `/api/spaces/${spaceId}/chat`, { message: 'one too many', client_key: uuid() });
-    t.ok('M5 the eleventh question is refused', eleventh.status === 429
-      && eleventh.json?.error === 'daily_limit_reached', eleventh.json);
-    t.ok('M5 the refusal names the midnight reset', /midnight/i.test(String(eleventh.json?.hint || '')), eleventh.json?.hint);
+    t.ok('M5 fifty questions are answered', answered === 50, answered);
+    const fiftyFirst = await env.call('POST', `/api/spaces/${spaceId}/chat`, { message: 'one too many', client_key: uuid() });
+    t.ok('M5 the fifty-first question is refused', fiftyFirst.status === 429
+      && fiftyFirst.json?.error === 'daily_limit_reached', fiftyFirst.json);
+    t.ok('M5 the refusal names the midnight reset', /midnight/i.test(String(fiftyFirst.json?.hint || '')), fiftyFirst.json?.hint);
     const wallet = await env.call('GET', '/api/wallet');
-    t.ok('M5 ten questions cost exactly 20 BC', wallet.json?.balance === before - 20, { before, after: wallet.json?.balance });
-    t.ok('M5 the counter shows ten used and none left', wallet.json?.daily_ai?.used === 10
+    t.ok('M5 fifty questions cost exactly 100 BC', wallet.json?.balance === before - 100, { before, after: wallet.json?.balance });
+    t.ok('M5 the counter shows fifty used and none left', wallet.json?.daily_ai?.used === 50
       && wallet.json?.daily_ai?.remaining === 0, wallet.json?.daily_ai);
   }
 
@@ -2578,8 +2603,8 @@ export async function sectionPhase2() {
     const wallet = await env.call('GET', '/api/wallet');
     t.ok('M7 the credits are still there after the reset', wallet.json?.balance === before.balance,
       { before: before.balance, after: wallet.json?.balance });
-    t.ok('M7 the allowance is back to the full ten', wallet.json?.daily_ai?.used === 0
-      && wallet.json?.daily_ai?.remaining === 10, wallet.json?.daily_ai);
+    t.ok('M7 the allowance is back to the full fifty', wallet.json?.daily_ai?.used === 0
+      && wallet.json?.daily_ai?.remaining === 50, wallet.json?.daily_ai);
     t.ok('M7 the earned and spent totals are untouched', wallet.json?.earned === before.earned
       && wallet.json?.spent === before.spent, { before, after: wallet.json });
     t.ok('M7 the ledger still holds every row it had', wallet.json?.history?.length === before.history.length,
@@ -2697,18 +2722,28 @@ export async function sectionPhase2() {
     const double = gatewayDouble(FREE_CATALOGUE, { models: { [FREE_FIRST]: { content: 'ok' } } });
     const { env, spaceId } = await centralEnv(double);
     const login = await env.call('POST', '/api/daily/login');
-    const before = login.json?.balance;
-    const results = await Promise.all(Array.from({ length: 11 }, (unused, index) =>
+    await grantCredits(env, 'student-a', 300);
+    const before = login.json?.balance + 300;
+    // Forty-four warmed answers bring the counter to the edge of fifty; the
+    // concurrency then races for the last slots exactly as before.
+    let warmed = 0;
+    for (let index = 0; index < 44; index += 1) {
+      if (index % 8 === 0) ageUsage(env);
+      const chat = await env.call('POST', `/api/spaces/${spaceId}/chat`, { message: `warm-up ${index}`, client_key: uuid() });
+      if (chat.status === 200) warmed += 1;
+    }
+    t.ok('M14 the warm-up answers land at the cap edge', warmed === 44, warmed);
+    const results = await Promise.all(Array.from({ length: 7 }, (unused, index) =>
       env.call('POST', `/api/spaces/${spaceId}/chat`, { message: `concurrent ${index}`, client_key: uuid() })));
     const ok = results.filter(result => result.status === 200);
     const refused = results.filter(result => result.status === 429);
-    t.ok('M14 exactly ten of eleven concurrent questions are answered', ok.length === 10, ok.length);
-    t.ok('M14 the eleventh is refused for the daily cap', refused.length === 1, refused.map(r => r.json?.error));
+    t.ok('M14 exactly fifty of fifty-one concurrent-era questions are answered', warmed + ok.length === 50, { warmed, ok: ok.length });
+    t.ok('M14 the fifty-first is refused for the daily cap', refused.length === 1, refused.map(r => r.json?.error));
     const spends = ledgerOf(env, 'student-a').filter(row => row.direction === 'spend');
-    t.ok('M14 there is one spend row of 2 BC per answer', spends.length === 10
+    t.ok('M14 there is one spend row of 2 BC per answer', spends.length === 50
       && spends.every(row => row.amount === 2), spends.length);
-    t.ok('M14 the balance fell by exactly 20 BC',
-      (await env.call('GET', '/api/wallet')).json?.balance === before - 20, { before });
+    t.ok('M14 the balance fell by exactly 100 BC',
+      (await env.call('GET', '/api/wallet')).json?.balance === before - 100, { before });
   }
 
   // ---- M15: a catalogue the size a real provider publishes is read whole ----
@@ -2824,6 +2859,7 @@ export async function sectionPhase2() {
     const double = gatewayDouble(FREE_CATALOGUE, { models: { [FREE_FIRST]: { content: 'ok' } } });
     const { env, spaceId } = await centralEnv(double);
     const login = await env.call('POST', '/api/daily/login');
+    await grantCredits(env, 'student-a', 300);
     const key = uuid();
     const first = await env.call('POST', `/api/spaces/${spaceId}/chat`, { message: 'what is acceleration', client_key: key });
     t.ok('M20 the first submission is answered and charged',
@@ -2842,14 +2878,15 @@ export async function sectionPhase2() {
     t.ok('M20 the allowance still counts the settled question',
       (await env.call('GET', '/api/wallet')).json?.daily_ai?.used === 1, null);
     let answered = 0;
-    for (let index = 0; index < 9; index += 1) {
+    for (let index = 0; index < 49; index += 1) {
+      if (index % 8 === 0) ageUsage(env);
       const chat = await env.call('POST', `/api/spaces/${spaceId}/chat`, { message: `follow-up ${index}`, client_key: uuid() });
       if (chat.status === 200) answered += 1;
     }
-    t.ok('M20 the remaining nine questions are answered', answered === 9, answered);
-    const eleventh = await env.call('POST', `/api/spaces/${spaceId}/chat`, { message: 'one too many', client_key: uuid() });
-    t.ok('M20 the cap still holds at ten despite the replay', eleventh.status === 429
-      && eleventh.json?.error === 'daily_limit_reached', eleventh.json);
+    t.ok('M20 the remaining forty-nine questions are answered', answered === 49, answered);
+    const fiftyFirst = await env.call('POST', `/api/spaces/${spaceId}/chat`, { message: 'one too many', client_key: uuid() });
+    t.ok('M20 the cap still holds at fifty despite the replay', fiftyFirst.status === 429
+      && fiftyFirst.json?.error === 'daily_limit_reached', fiftyFirst.json);
   }
 
   // ---- M21: a concurrent duplicate charges once and keeps one slot ---------
@@ -2900,7 +2937,7 @@ export async function sectionPhase2() {
     t.ok('M22 an unpaid request is refused', broke.status === 409 && broke.json?.error === 'insufficient_credits', broke.json);
     const wallet = await env.call('GET', '/api/wallet');
     t.ok('M22 the refused request keeps the full allowance', wallet.json?.daily_ai?.used === 0
-      && wallet.json?.daily_ai?.remaining === 10, wallet.json?.daily_ai);
+      && wallet.json?.daily_ai?.remaining === 50, wallet.json?.daily_ai);
     t.ok('M22 the refused request left no slot behind',
       env.db.table('ai_daily_slots').filter(slot => slot.request_key === key).length === 0,
       env.db.table('ai_daily_slots').map(slot => [slot.request_key, slot.slot]));

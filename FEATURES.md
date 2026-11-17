@@ -214,10 +214,10 @@ either.
 Only administrators manage provider credentials. The student's own key remains
 available as a BYOK option for anyone who wants it.
 
-**The daily allowance is server-side and race-free.** Each student may ask **10
+**The daily allowance is server-side and race-free.** Each student may ask **50
 successful questions per day**. The count lives in `app.ai_daily_slots` — one numbered
-slot row per question, unique on `(owner_id, day, slot)` — so eleven simultaneous
-clicks yield ten answers and one refusal, never eleven. A failed request releases its
+slot row per question, unique on `(owner_id, day, slot)` — so fifty-one simultaneous
+clicks yield fifty answers and one refusal, never fifty-one. A failed request releases its
 slot, so it never consumes the allowance. A refresh, a logout or a new device changes
 nothing.
 
@@ -343,7 +343,7 @@ first-class card, above the student's own providers, reading exactly:
 
 The card reports what the server knows, never an optimistic guess: whether the central
 provider is configured, which free models are available right now, how many of the
-student's 10 daily questions remain, the BC balance, and the exact instant of the next
+student's 50 daily questions remain, the BC balance, and the exact instant of the next
 reset at 12:00 AM `Asia/Karachi`. A student needs no OpenRouter account, no API key
 and no Gemini key to use the tutor. When the central provider is not configured, the
 card says so plainly and points at the administrator — it does not fall back to a

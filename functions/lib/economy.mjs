@@ -44,7 +44,7 @@ export const DEFAULT_REWARDS = {
 };
 
 export const DEFAULT_LIMITS = {
-  daily_questions_per_student: 10,
+  daily_questions_per_student: 50,
   concurrent_requests_per_student: 1,
   max_output_tokens: 1800,
   shared_daily_quota: 0,
