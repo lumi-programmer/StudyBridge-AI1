@@ -68,9 +68,9 @@ signed-URL storage).
    probe to fail with SQLSTATE 42501. Read its header first: the editor's
    pooler can route consecutive statements to different backends, which is why
    the simulation is one statement rather than many.
-5. Storage → **New bucket**: name it `studybridge` (or set
-   `SUPABASE_STORAGE_BUCKET` on Render to match) and leave **public access
-   OFF**. Every object is written and read by the Render backend through
+5. Storage → **New bucket**: name it `studybridge` — the exact name, lowercase,
+   no spaces (or set `SUPABASE_STORAGE_BUCKET` on Render to match) — and leave
+   **public access OFF**. Every object is written and read by the Render backend through
    server-issued, short-lived signed capability URLs; a bucket that is public
    defeats that entirely.
 6. Authentication: email/password sign-up stays enabled (the default). Under

@@ -295,7 +295,7 @@ export function createLibrary({ add, db, fail, rows, storage, ai, rewards, verif
     try { signed = await storage.createSignedUploadUrl(objectPath, { upsert: false }); }
     catch (error) {
       if (error?.code === 'storage_object_not_found') {
-        fail('storage_unavailable', 503, `File storage is not ready on the server yet — the private "${storage.bucket || 'studybridge'}" bucket is missing in the storage project. An administrator can create it under Supabase → Storage (New bucket, name "${storage.bucket || 'studybridge'}", private), then uploads will work.`);
+        fail('storage_unavailable', 503, `File storage is not ready on the server yet — the private "${storage.bucket || 'studybridge'}" bucket is missing in the storage project. An administrator can create it under Supabase → Storage (New bucket, name exactly "${storage.bucket || 'studybridge'}" — lowercase, no spaces — private), then uploads will work.`);
       }
       fail('storage_unavailable', 503);
     }
