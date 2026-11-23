@@ -238,7 +238,7 @@ export function createChat({ add, db, fail, rows, ai, rewards, economy, ensurePr
       id: answerId, owner_id: user.id, conversation_id: conversation.id,
       role: 'assistant', content: String(result.text).slice(0, 20000),
       provider: result.provider?.provider_key || '', model: result.model?.model_id || '',
-      style, tokens: (result.inputTokens || 0) + (result.outputTokens || 0),
+      tokens: (result.inputTokens || 0) + (result.outputTokens || 0),
       cost_micro: result.costMicro || 0, sources, request_key: reservation.key,
       state: '', created_at: nowIso(),
     }).select(MESSAGE_COLUMNS))[0] || fail('database_unavailable', 503);

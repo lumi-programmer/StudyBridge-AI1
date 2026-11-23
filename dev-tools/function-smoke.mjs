@@ -8,6 +8,15 @@
 const ROOT = 'file:///C:/Users/ITZ_V/Documents/Qoder/2026-10-31/42df40d0/dev-tools/flat/';
 
 // ---- fake database ----------------------------------------------------------
+// Column whitelists mirroring migration 5. PostgREST rejects a write that names
+// a column the table does not have (PGRST204, HTTP 400) — the fake mirrors that
+// so a chat insert with a wrong column fails the suite instead of only failing
+// live.
+const TABLE_COLUMNS = {
+  chat_conversations: ['id', 'owner_id', 'title', 'message_count', 'model', 'provider', 'created_at', 'updated_at'],
+  chat_messages: ['id', 'owner_id', 'conversation_id', 'role', 'content', 'provider', 'model', 'tokens', 'cost_micro', 'sources', 'request_key', 'state', 'created_at'],
+};
+
 function fakeDb() {
   const tables = new Map();
   const table = name => {
@@ -78,6 +87,13 @@ function fakeDb() {
         action: this.action,
         rows: Array.isArray(this.payload) ? this.payload.length : (this.payload ? 1 : null),
       });
+      const schema = TABLE_COLUMNS[this.t];
+      if (schema && (this.action === 'insert' || this.action === 'upsert' || this.action === 'update') && this.payload) {
+        for (const row of (Array.isArray(this.payload) ? this.payload : [this.payload])) {
+          const unknown = Object.keys(row).find(key => !schema.includes(key));
+          if (unknown) return { data: null, error: { code: 'PGRST204', status: 400, message: `Could not find the '${unknown}' column of '${this.t}' in the schema cache` } };
+        }
+      }
       const rowsIn = table(this.t);
       if (this.action === 'upsert') {
         // merge-duplicates: a row matching the conflict keys is rewritten in
