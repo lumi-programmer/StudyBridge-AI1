@@ -256,9 +256,13 @@ export function richText(text, { dir } = {}) {
   let list = null;
   let listTag = '';
   const inline = line => {
-    const parts = String(line).split(/(\*\*[^*]+\*\*)/g);
-    return parts.filter(Boolean).map(part => part.startsWith('**') && part.endsWith('**') && part.length > 4
-      ? h('strong', { text: part.slice(2, -2) }) : document.createTextNode(part));
+    const parts = String(line).split(/(`[^`]+`|\*\*[^*]+\*\*)/g);
+    return parts.filter(Boolean).map(part => {
+      if (part.length > 2 && part.startsWith('`') && part.endsWith('`')) return h('code', { text: part.slice(1, -1) });
+      if (part.startsWith('**') && part.endsWith('**') && part.length > 4)
+        return h('strong', { text: part.slice(2, -2) });
+      return document.createTextNode(part);
+    });
   };
   for (const raw of String(text || '').replace(/\r/g, '').split('\n')) {
     const line = raw.trimEnd();

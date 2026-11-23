@@ -3,7 +3,7 @@
 // it exposes is exactly the one the application factory consumes — the same
 // builder the platform runtime and the test harness fake provide:
 //
-//   db.from(table).select(cols).eq/neq/in/gte/order/limit
+//   db.from(table).select(cols).eq/neq/in/gte/lte/lt/order/limit
 //     .insert(values) | .insertIfAbsent(values, { onConflict }) | .update(values) | .delete()
 //   → { data, error }  where error is null or { code, status, message }
 //
@@ -58,6 +58,14 @@ export function createSupabaseDb({
       },
       gte(column, value) {
         state.filters.push([String(column), ['gte', String(value)]]);
+        return api;
+      },
+      lte(column, value) {
+        state.filters.push([String(column), ['lte', String(value)]]);
+        return api;
+      },
+      lt(column, value) {
+        state.filters.push([String(column), ['lt', String(value)]]);
         return api;
       },
       order(column, options = {}) {

@@ -39,6 +39,8 @@ function fakeDb() {
     neq(column, value) { this.notFilters.push([column, value]); return this; }
     in(column, values) { this.filters.push(['__in', column, values]); return this; }
     gte(column, value) { this.filters.push(['__gte', column, value]); return this; }
+    lte(column, value) { this.filters.push(['__lte', column, value]); return this; }
+    lt(column, value) { this.filters.push(['__lt', column, value]); return this; }
     order(column, options) { this.orders.push([column, options?.ascending !== false]); return this; }
     limit(count) { this.size = count; return this; }
     range() { throw new Error('unsupported: range'); }
@@ -55,6 +57,8 @@ function fakeDb() {
       for (const filter of this.filters) {
         if (filter[0] === '__in') { if (!filter[2].includes(row[filter[1]])) return false; continue; }
         if (filter[0] === '__gte') { if (!(String(row[filter[1]]) >= String(filter[2]))) return false; continue; }
+        if (filter[0] === '__lte') { if (!(String(row[filter[1]]) <= String(filter[2]))) return false; continue; }
+        if (filter[0] === '__lt') { if (!(String(row[filter[1]]) < String(filter[2]))) return false; continue; }
         if (row[filter[0]] !== filter[1]) return false;
       }
       for (const [column, value] of this.notFilters) if (row[column] === value) return false;

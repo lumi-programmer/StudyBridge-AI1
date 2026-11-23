@@ -124,6 +124,42 @@ stub that enforces Google's binding, and
 `dev-tools/gemini-path-probe.mjs` prints the literal request line a stub that enforces
 Google's binding accepted.
 
+## AI Chat `#/ai-chat`
+The dedicated ChatGPT-style section: a sidebar of titled conversations next to a
+single message thread. It reuses the platform's AI and credit plumbing exactly —
+the same central gateway decides the model, and the same Bridge Credits ledger
+charges `basic_question` (2 BC) per answer — so nothing here can pick a model,
+price it, or move a balance on its own.
+
+- **Backend** (`functions/lib/dom/chat.mjs`, tables `app.chat_conversations` +
+  `app.chat_messages`, migration 5): `GET /api/chats` (newest-first, cursor
+  pages), `GET /api/chats/:id/messages` (ascending cursor pages, so a long
+  thread never loads whole), `POST /api/chats` (starts a conversation *with* its
+  first message — a refused send leaves no empty conversation row behind),
+  `POST /api/chats/:id/messages`, `PATCH /api/chats/:id` (rename), `DELETE
+  /api/chats/:id` (deletes the thread and its messages).
+- **The turn** mirrors the tutor: `reserveAi` before any provider contact →
+  replay of a settled key returns the stored answer free → user row stored → one
+  `ai.complete` over the last 16 turns as context → `settleAi`, or on failure a
+  user row marked `failed` + `refundAi`. A retry re-sends the *same*
+  `client_key`: the ledger books it as attempt 2 of one message, the failed user
+  row is reused (never duplicated), and the net cost stays one debit per
+  delivered answer.
+- **Titles** are derived locally from the first message (no extra AI call); the
+  student can rename (≤80 chars) or delete (confirm sheet) any conversation.
+- **Ownership**: every query carries `owner_id = user.id` server-side; RLS on
+  both tables is the second layer, exactly like `app.spaces`. Section X holds 61
+  checks: charge/replay/refund/retry arithmetic, lifecycle, cross-student 404s,
+  cursor pagination without duplicates, empty-balance refusal, context carry.
+- **Frontend** (`web/js/views/aichat.js`, lazy-loaded like every view): desktop
+  sidebar + main panel, mobile drawer; Enter sends, Shift+Enter makes a newline,
+  the composer auto-resizes; answers render through the shared textContent-only
+  markdown renderer plus fenced code blocks with a Copy button and light token
+  colouring; failed messages keep a Retry affordance; balance and per-message
+  cost are shown as chips read from the server.
+- **Known limits (honest)**: streaming and a stop button are not offered — the
+  adapter completes one JSON answer per request, so neither is faked.
+
 ## 6. Free Trial Provider
 Platform-owned, server-side, finite, and honest about being unavailable.
 

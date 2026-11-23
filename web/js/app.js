@@ -12,6 +12,7 @@ const ROUTES = {
   library: () => import('./views/library.js'),
   scanner: () => import('./views/scanner.js'),
   tutor: () => import('./views/tutor.js'),
+  'ai-chat': () => import('./views/aichat.js'),
   focus: () => import('./views/focus.js'),
   games: () => import('./views/games.js'),
   streak: () => import('./views/streak.js'),
@@ -23,7 +24,7 @@ const ROUTES = {
   login: () => import('./views/login.js'),
 };
 const TITLES = {
-  dashboard: 'Dashboard', spaces: 'My Spaces', library: 'My Library', scanner: 'Smart Scanner', tutor: 'AI Tutor',
+  dashboard: 'Dashboard', spaces: 'My Spaces', library: 'My Library', scanner: 'Smart Scanner', tutor: 'AI Tutor', 'ai-chat': 'AI Chat',
   focus: 'Focus Mode', games: 'Game Center', streak: 'Daily Streaks', progress: 'My Progress', wallet: 'Bridge Wallet',
   rewards: 'Rewards Center', admin: 'Admin', settings: 'Settings', login: 'Sign in', notfound: 'Page not found',
 };

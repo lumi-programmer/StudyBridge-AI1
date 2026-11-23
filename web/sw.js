@@ -15,7 +15,7 @@
 //     cache. A whitelist approach also means any future private route is safe
 //     by default: it is cached only if someone adds it here on purpose.
 
-const VERSION = 'v2';
+const VERSION = 'v3';
 const SHELL_CACHE = `studybridge-shell-${VERSION}`;
 const ASSET_CACHE = `studybridge-assets-${VERSION}`;
 const KEEP = [SHELL_CACHE, ASSET_CACHE];
@@ -39,6 +39,7 @@ const PRECACHE = [
   './js/theme.js',
   './js/ui.js',
   './js/views/admin.js',
+  './js/views/aichat.js',
   './js/views/dashboard.js',
   './js/views/focus.js',
   './js/views/games.js',

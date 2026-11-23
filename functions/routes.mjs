@@ -15,6 +15,7 @@ import { createLibrary } from './lib/dom/library.mjs';
 import { createLearning } from './lib/dom/learn.mjs';
 import { createProviders } from './lib/dom/providers.mjs';
 import { createAdmin } from './lib/dom/admin.mjs';
+import { createChat } from './lib/dom/chat.mjs';
 import { addDays, bool as toBool, dayOf, int as toInt, jsonValue, text as asText, uuid as asUuid } from './lib/util.mjs';
 import { verifyUploadedObject } from './storage-validation.mjs';
 
@@ -220,7 +221,7 @@ export function application({ db, storage, requireUser, BackendError, envProvide
     catch { fail('invalid_input', 400); }
   }
 
-  const domains = [createCore, createSpaces, createLibrary, createLearning, createProviders, createAdmin];
+  const domains = [createCore, createSpaces, createLibrary, createLearning, createProviders, createAdmin, createChat];
   for (const domain of domains) domain({ ...ctx, add });
 
   return async function handle(requestContext) {

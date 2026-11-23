@@ -3084,6 +3084,290 @@ export async function sectionPhase2() {
   return { env: null, report: t.summary() };
 }
 
+// ---- section X: the dedicated AI Chat ----------------------------------------
+// Titled conversations on their own tables, answered by the same central free
+// gateway and charged by the same Bridge Credits ledger as the tutor. The cases
+// below pin the whole turn: charge, replay, refund, retry-after-refund, the
+// conversation lifecycle, ownership isolation, cursor pagination and the empty
+// balance refusal that must not leave an orphan conversation behind.
+export async function sectionChat() {
+  const t = tracker();
+
+  // ---- X1: the first message starts a conversation and costs exactly 2 ------
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, {
+      models: { [FREE_FIRST]: { content: 'Nitric acid (HNO3) is a strong mineral acid.' } },
+    });
+    const setup = await gatewayEnv(double);
+    await setup.env.call('POST', '/api/daily/login');
+    const before = (await setup.env.call('GET', '/api/wallet')).json.balance;
+    const key = uuid();
+    const sent = await setup.env.call('POST', '/api/chats', {
+      content: 'Explain a difficult chemistry concept: nitric acid', client_key: key,
+    });
+    t.ok('X1 the chat answers through the central gateway', sent.status === 200 && /nitric acid/i.test(sent.json?.reply || ''), sent.json);
+    t.ok('X1 the answer names a verified free model', sent.json?.model?.model_id === FREE_FIRST, sent.json?.model);
+    t.ok('X1 the message cost exactly 2 credits', sent.json?.credits_spent === 2, sent.json?.credits_spent);
+    t.ok('X1 the balance read-back matches the wallet', before - sent.json?.balance === 2, { before, after: sent.json?.balance });
+    t.ok('X1 the conversation is titled from the first message', typeof sent.json?.title === 'string'
+      && sent.json.title.length > 0 && sent.json.title.length <= 60, sent.json?.title);
+    const convId = sent.json?.conversation_id;
+    const thread = await setup.env.call('GET', `/api/chats/${convId}/messages`);
+    t.ok('X1 both turns are stored in order', thread.json?.messages?.length === 2
+      && thread.json?.messages?.[0]?.role === 'user' && thread.json?.messages?.[1]?.role === 'assistant', thread.json?.messages);
+    t.ok('X1 the user row carries the request key', thread.json?.messages?.[0]?.request_key === key, thread.json?.messages?.[0]);
+    t.ok('X1 the assistant row names the model', thread.json?.messages?.[1]?.model === FREE_FIRST, thread.json?.messages?.[1]);
+    const list = await setup.env.call('GET', '/api/chats');
+    t.ok('X1 the sidebar lists one conversation of two messages', list.json?.conversations?.length === 1
+      && list.json?.conversations?.[0]?.message_count === 2 && list.json?.next_before === null, list.json);
+    t.ok('X1 the gateway was contacted once', double.count(FREE_FIRST) === 1, double.total());
+  }
+
+  // ---- X2: the same key on the same conversation replays, never charges -----
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, {
+      models: { [FREE_FIRST]: { content: 'Velocity is speed with a direction.' } },
+    });
+    const setup = await gatewayEnv(double);
+    await setup.env.call('POST', '/api/daily/login');
+    const key = uuid();
+    const content = 'Help me understand a physics problem: velocity';
+    const sent = await setup.env.call('POST', '/api/chats', { content, client_key: key });
+    const convId = sent.json?.conversation_id;
+    const replay = await setup.env.call('POST', `/api/chats/${convId}/messages`, { content, client_key: key });
+    t.ok('X2 the replay returns the stored answer', replay.status === 200 && replay.json?.replayed === true
+      && replay.json?.reply === sent.json?.reply, { status: replay.status, replayed: replay.json?.replayed });
+    const spends = ledgerOf(setup.env, 'student-a').filter(row => row.direction === 'spend');
+    t.ok('X2 the ledger holds one spend row, not two', spends.length === 1 && spends[0].amount === 2, spends);
+    const after = (await setup.env.call('GET', '/api/wallet')).json.balance;
+    t.ok('X2 the replay left the balance where the first answer did', after === sent.json?.balance, { after, first: sent.json?.balance });
+    t.ok('X2 the replay contacted the provider once in total', double.count(FREE_FIRST) === 1, double.total());
+    // A different key sending the same words is a NEW message, not a replay.
+    const fresh = await setup.env.call('POST', `/api/chats/${convId}/messages`, { content: 'and acceleration?', client_key: uuid() });
+    t.ok('X2 a new key is a new charged turn', fresh.status === 200 && fresh.json?.replayed === undefined
+      && fresh.json?.credits_spent === 2, { s: fresh.status, r: fresh.json?.replayed });
+  }
+
+  // ---- X3: a failed generation refunds, and a retry charges once more -------
+  {
+    let down = false;
+    const recovered = 'Momentum is mass times velocity.';
+    const double = gatewayDouble(FREE_CATALOGUE, {
+      models: {
+        [FREE_FIRST]: () => (down ? { status: 503, message: 'The model is temporarily unavailable due to high demand.' } : { content: recovered }),
+        [FREE_SECOND]: () => (down ? { status: 503, message: 'The model is temporarily unavailable due to high demand.' } : { content: recovered }),
+      },
+    });
+    const setup = await gatewayEnv(double);
+    await setup.env.call('POST', '/api/daily/login');
+    const started = (await setup.env.call('GET', '/api/wallet')).json.balance;
+    const first = await setup.env.call('POST', '/api/chats', { content: 'Hello there', client_key: uuid() });
+    t.ok('X3 the opening turn answers', first.status === 200, { s: first.status, e: first.json?.error });
+    const convId = first.json?.conversation_id;
+    const afterFirst = (await setup.env.call('GET', '/api/wallet')).json.balance;
+    const key = uuid();
+    down = true;
+    const failed = await setup.env.call('POST', `/api/chats/${convId}/messages`, {
+      content: 'What is momentum?', client_key: key,
+    });
+    t.ok('X3 the outage is reported, not faked', failed.status === 503 && failed.json?.error === 'free_models_unavailable', failed.json);
+    const afterFail = (await setup.env.call('GET', '/api/wallet')).json.balance;
+    t.ok('X3 the reserved credits came back', afterFail === afterFirst, { afterFirst, afterFail });
+    t.ok('X3 the refund is on the ledger', ledgerOf(setup.env, 'student-a')
+      .filter(row => String(row.reason).startsWith('refund:')).length === 1, ledgerOf(setup.env, 'student-a').map(row => row.reason));
+    const failedRows = setup.env.db.table('chat_messages').filter(row => row.conversation_id === convId);
+    t.ok('X3 the user message stays visible as failed', failedRows.length === 3
+      && failedRows[2]?.state === 'failed', failedRows.map(row => row.state));
+    t.ok('X3 the conversation keeps its title and count', failedRows.length === 3, failedRows.length);
+
+    // The outage put every free model into its temporary cooldown window; the
+    // retry in a moment would still be inside it. The window is closed here by
+    // hand (the same thing waiting does) so the retry turn reaches the provider.
+    for (const row of setup.env.db.table('ai_models')) {
+      row.cooldown_until = null; row.cooldown_reason = ''; row.fail_streak = 0;
+    }
+    down = false;
+    const retried = await setup.env.call('POST', `/api/chats/${convId}/messages`, {
+      content: 'What is momentum?', client_key: key,
+    });
+    t.ok('X3 the retry with the same key answers', retried.status === 200 && retried.json?.reply === recovered, retried.json);
+    const finished = (await setup.env.call('GET', '/api/wallet')).json.balance;
+    t.ok('X3 the net charge is one debit per delivered answer', started - finished === 4, { started, finished });
+    const rows = ledgerOf(setup.env, 'student-a');
+    const spends = rows.filter(row => row.direction === 'spend');
+    t.ok('X3 the ledger books three debits and one refund', spends.length === 3
+      && rows.filter(row => String(row.reason).startsWith('refund:')).length === 1, rows.map(row => row.reason));
+    t.ok('X3 the ledger still sums to the balance', ledgerSum(rows) === finished, { sum: ledgerSum(rows), finished });
+    const request = setup.env.db.table('ai_requests').find(row => row.request_key === key);
+    t.ok('X3 the request row shows attempt 2 settled', request?.attempt === 2 && request?.state === 'settled', request);
+    const userRows = setup.env.db.table('chat_messages')
+      .filter(row => row.conversation_id === convId && row.role === 'user' && row.request_key === key);
+    t.ok('X3 the retry reused the failed user row', userRows.length === 1 && userRows[0].state === '', userRows);
+    const finalThread = await setup.env.call('GET', `/api/chats/${convId}/messages`);
+    t.ok('X3 the thread holds four messages after the retry', finalThread.json?.messages?.length === 4, finalThread.json?.messages?.length);
+    const list = await setup.env.call('GET', '/api/chats');
+    t.ok('X3 the sidebar shows the final message count', list.json?.conversations?.[0]?.message_count === 4, list.json);
+  }
+
+  // ---- X4: rename ------------------------------------------------------------
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, { models: { [FREE_FIRST]: { content: 'ok' } } });
+    const setup = await gatewayEnv(double);
+    const sent = await setup.env.call('POST', '/api/chats', { content: 'Summarize my study notes', client_key: uuid() });
+    const convId = sent.json?.conversation_id;
+    const renamed = await setup.env.call('PATCH', `/api/chats/${convId}`, { title: 'My chemistry chat' });
+    t.ok('X4 the rename sticks', renamed.status === 200 && renamed.json?.conversation?.title === 'My chemistry chat', renamed.json);
+    const list = await setup.env.call('GET', '/api/chats');
+    t.ok('X4 the sidebar shows the new title', list.json?.conversations?.[0]?.title === 'My chemistry chat', list.json);
+    const blank = await setup.env.call('PATCH', `/api/chats/${convId}`, { title: '   ' });
+    t.ok('X4 a blank title is refused', blank.status === 400 && blank.json?.error === 'invalid_input', blank.json);
+    const long = await setup.env.call('PATCH', `/api/chats/${convId}`, { title: 'x'.repeat(90) });
+    t.ok('X4 an over-long title is refused', long.status === 400, long.status);
+  }
+
+  // ---- X5: delete removes the conversation and its messages ------------------
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, { models: { [FREE_FIRST]: { content: 'ok' } } });
+    const setup = await gatewayEnv(double);
+    const sent = await setup.env.call('POST', '/api/chats', { content: 'Create practice questions for my exam', client_key: uuid() });
+    const convId = sent.json?.conversation_id;
+    const gone = await setup.env.call('DELETE', `/api/chats/${convId}`);
+    t.ok('X5 the delete succeeds', gone.status === 200 && gone.json?.ok === true, gone);
+    const thread = await setup.env.call('GET', `/api/chats/${convId}/messages`);
+    t.ok('X5 the conversation is not found afterwards', thread.status === 404 && thread.json?.error === 'not_found', thread.json);
+    const remaining = setup.env.db.table('chat_messages').filter(row => row.conversation_id === convId);
+    t.ok('X5 no message rows survive', remaining.length === 0, remaining.length);
+    const list = await setup.env.call('GET', '/api/chats');
+    t.ok('X5 the sidebar is empty again', list.json?.conversations?.length === 0, list.json);
+    const repeat = await setup.env.call('DELETE', `/api/chats/${convId}`);
+    t.ok('X5 deleting a missing conversation is a clean 404', repeat.status === 404, repeat.status);
+  }
+
+  // ---- X6: one student cannot touch another student's conversations ---------
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, { models: { [FREE_FIRST]: { content: 'ok' } } });
+    const setup = await gatewayEnv(double);
+    const studentB = setup.env.users[1];
+    const sent = await setup.env.call('POST', '/api/chats', { content: 'private question', client_key: uuid() });
+    const convId = sent.json?.conversation_id;
+    const attacks = [
+      ['GET', `/api/chats/${convId}/messages`, undefined],
+      ['POST', `/api/chats/${convId}/messages`, { content: 'sneaky', client_key: uuid() }],
+      ['PATCH', `/api/chats/${convId}`, { title: 'hijacked' }],
+      ['DELETE', `/api/chats/${convId}`, undefined],
+    ];
+    const results = [];
+    for (const [method, path, body] of attacks) results.push(await setup.env.call(method, path, body, studentB));
+    t.ok('X6 every cross-student access is a 404', results.every(r => r.status === 404 && r.json?.error === 'not_found'),
+      results.map(r => [r.status, r.json?.error]));
+    const bList = await setup.env.call('GET', '/api/chats', undefined, studentB);
+    t.ok('X6 the other student sees no conversations at all', bList.json?.conversations?.length === 0, bList.json);
+    const untouched = await setup.env.call('GET', `/api/chats/${convId}/messages`, undefined, setup.env.users[0]);
+    t.ok('X6 the owner still reads the thread', untouched.status === 200 && untouched.json?.messages?.length === 2, untouched.status);
+  }
+
+  // ---- X7: messages page by cursor without loading the whole thread ---------
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, { models: { [FREE_FIRST]: { content: 'ok' } } });
+    const setup = await gatewayEnv(double);
+    const convId = uuid();
+    const base = Date.now();
+    setup.env.db.table('chat_conversations').push({
+      id: convId, owner_id: 'student-a', title: 'Seeded thread', message_count: 55,
+      model: '', provider: '', created_at: new Date(base).toISOString(), updated_at: new Date(base).toISOString(),
+    });
+    for (let i = 0; i < 55; i += 1) {
+      setup.env.db.table('chat_messages').push({
+        id: uuid(), owner_id: 'student-a', conversation_id: convId, role: i % 2 ? 'assistant' : 'user',
+        content: `seeded message ${i}`, provider: '', model: '', tokens: 0, cost_micro: 0,
+        sources: {}, request_key: '', state: '', created_at: new Date(base + i * 1000).toISOString(),
+      });
+    }
+    const page1 = await setup.env.call('GET', `/api/chats/${convId}/messages`);
+    t.ok('X7 the first page holds 50 of 55', page1.json?.messages?.length === 50, page1.json?.messages?.length);
+    t.ok('X7 the first page runs oldest to newest', page1.json?.messages?.[0]?.created_at < page1.json?.messages?.[49]?.created_at, null);
+    t.ok('X7 a cursor is offered', typeof page1.json?.next_before === 'string' && page1.json.next_before.length > 0, page1.json?.next_before);
+    const page2 = await setup.env.call('GET', `/api/chats/${convId}/messages?before=${encodeURIComponent(page1.json.next_before)}`);
+    t.ok('X7 the second page holds the remaining 5', page2.json?.messages?.length === 5 && page2.json?.next_before === null, page2.json?.messages?.length);
+    const ids = [...page1.json.messages, ...page2.json.messages].map(m => m.id);
+    t.ok('X7 the two pages cover the thread exactly once', new Set(ids).size === 55, ids.length);
+    t.ok('X7 page 2 stops strictly before the cursor',
+      page2.json.messages.every(m => m.created_at < page1.json.next_before), null);
+  }
+
+  // ---- X8: the conversation list pages too ----------------------------------
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, { models: { [FREE_FIRST]: { content: 'ok' } } });
+    const setup = await gatewayEnv(double);
+    const base = Date.now();
+    for (let i = 0; i < 35; i += 1) {
+      setup.env.db.table('chat_conversations').push({
+        id: uuid(), owner_id: 'student-a', title: `chat ${i}`, message_count: i,
+        model: '', provider: '', created_at: new Date(base + i * 1000).toISOString(),
+        updated_at: new Date(base + i * 1000).toISOString(),
+      });
+    }
+    const page1 = await setup.env.call('GET', '/api/chats?limit=30');
+    t.ok('X8 the first page holds 30 of 35 newest first', page1.json?.conversations?.length === 30
+      && page1.json?.conversations?.[0]?.title === 'chat 34', { n: page1.json?.conversations?.length, first: page1.json?.conversations?.[0]?.title });
+    const page2 = await setup.env.call('GET', `/api/chats?limit=30&before=${encodeURIComponent(page1.json.next_before)}`);
+    t.ok('X8 the second page holds the 5 oldest', page2.json?.conversations?.length === 5
+      && page2.json?.next_before === null && page2.json?.conversations?.[4]?.title === 'chat 0', page2.json?.conversations?.length);
+    const ids = [...page1.json.conversations, ...page2.json.conversations].map(c => c.id);
+    t.ok('X8 no conversation appears on both pages', new Set(ids).size === 35, ids.length);
+  }
+
+  // ---- X9: an empty balance refuses the send and leaves nothing behind ------
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, { models: { [FREE_FIRST]: { content: 'ok' } } });
+    const setup = await gatewayEnv(double);
+    const studentB = setup.env.users[1];
+    for (const feature of ['advanced_comparison', 'revision_notes', 'passage_summary']) {
+      await setup.env.call('POST', '/api/wallet/spend', { feature, client_key: uuid() }, studentB);
+    }
+    const drained = (await setup.env.call('GET', '/api/wallet', undefined, studentB)).json.balance;
+    t.ok('X9 the second student has nothing left', drained === 0, drained);
+    const refused = await setup.env.call('POST', '/api/chats', {
+      content: 'Explain a difficult chemistry concept', client_key: uuid(),
+    }, studentB);
+    t.ok('X9 the send is refused with insufficient credits', refused.status === 409
+      && refused.json?.error === 'insufficient_credits', refused.json);
+    const bList = await setup.env.call('GET', '/api/chats', undefined, studentB);
+    t.ok('X9 the refusal left no conversation row behind', bList.json?.conversations?.length === 0, bList.json);
+    t.ok('X9 no provider was contacted', double.total() === 0, double.total());
+    t.ok('X9 the ledger still sums to zero', ledgerSum(ledgerOf(setup.env, studentB.id)) === 0, null);
+  }
+
+  // ---- X10: the follow-up turn carries the earlier conversation -------------
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, { models: { [FREE_FIRST]: { content: 'ok' } } });
+    const setup = await gatewayEnv(double);
+    await setup.env.call('POST', '/api/daily/login');
+    const sent = await setup.env.call('POST', '/api/chats', { content: 'What is photosynthesis?', client_key: uuid() });
+    const convId = sent.json?.conversation_id;
+    await setup.env.call('POST', `/api/chats/${convId}/messages`, { content: 'And how does respiration differ?', client_key: uuid() });
+    const second = double.calls.filter(call => call.body.messages?.length).at(-1);
+    const prompt = (second?.body?.messages || []).map(m => (typeof m.content === 'string' ? m.content : '')).join('\n');
+    t.ok('X10 the follow-up includes the earlier turns', prompt.includes('Earlier in this conversation'), prompt.slice(0, 200));
+    t.ok('X10 the earlier question is quoted in the context', prompt.includes('What is photosynthesis?'), prompt.slice(0, 200));
+    t.ok('X10 the new question is passed as the live message', prompt.includes('And how does respiration differ?'), prompt.slice(-200));
+  }
+
+  // ---- X11: input validation -------------------------------------------------
+  {
+    const double = gatewayDouble(FREE_CATALOGUE, { models: { [FREE_FIRST]: { content: 'ok' } } });
+    const setup = await gatewayEnv(double);
+    const empty = await setup.env.call('POST', '/api/chats', { content: '   ', client_key: uuid() });
+    t.ok('X11 a blank message is refused', empty.status === 400 && empty.json?.error === 'invalid_input', empty.json);
+    const badId = await setup.env.call('GET', '/api/chats/not-a-uuid/messages');
+    t.ok('X11 a malformed conversation id is refused', badId.status === 400 && badId.json?.error === 'invalid_input', badId.json);
+    const missing = await setup.env.call('GET', `/api/chats/${uuid()}/messages`);
+    t.ok('X11 an unknown conversation is a 404', missing.status === 404 && missing.json?.error === 'not_found', missing.json);
+  }
+
+  return { env: null, report: t.summary() };
+}
+
 // ---- section O: sign-in and registration error handling ---------------------
 // Regression net for the auth bug. The browser's sign-in button must reach the
 // Supabase password grant (never the signup endpoint), duplicate sign-ups must
